@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>クイズに参加</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#1e1b3a">
 <link rel="stylesheet" href="style.css">
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
@@ -20,6 +23,7 @@
   document.title = Q.C.APP_TITLE;
   document.getElementById('appTitle').textContent = Q.C.APP_TITLE;
   Q.demoBanner();
+  let E = null, live = null, liveLoaded = false, evUnsubs = [], roster = {};
 
   const PITCH = 66;            // 並び替えカードの間隔(px)
   const LINE_COLORS = ['#ff5a5f', '#3d8bfd', '#f5b301', '#22b573', '#a259ff', '#ff8a3d', '#ff6fb5', '#2ad1d1'];
@@ -32,58 +36,115 @@
   // local.value[項目] = 割り当てた番号/グループ（未選択は null）
   let local = { qid: null, value: null, order: null, sel: null };
   let boundQid = null, unsubs = [];
-  let drag = null, pendingRender = false;
+  let drag = null, pendingRender = false, lastViewScene = '', swapTimer = null;
 
-  Store.listen('players/' + pid, v => { me = v; meLoaded = true; render(); });
-  Store.listen('state', v => { state = v || { phase: 'lobby' }; bindQuestion(); render(); });
-  Store.listen('scores', v => { scores = v || {}; if (['reveal', 'ranking', 'spotlight'].includes(state.phase)) render(); });
-  Store.listen('players', v => { players = v || {}; if (['ranking', 'spotlight'].includes(state.phase)) render(); });
+  let prevPhase = null, celebrated = '';
+  // 進行画面が「本番」にした開催に参加する
+  Store.listen('live', v => {
+    liveLoaded = true;
+    const eid = v && v.eid;
+    live = v || null;
+    const title = (live && live.title) || Q.C.APP_TITLE;
+    document.getElementById('appTitle').textContent = title;
+    document.title = title + (live ? '｜' + Q.C.APP_TITLE : '');
+    if (!E || E.eid !== eid) bindEvent(eid);
+    render();
+  });
+  function bindEvent(eid) {
+    evUnsubs.forEach(f => f()); evUnsubs = [];
+    unsubs.forEach(f => f()); unsubs = []; boundQid = null;
+    me = null; meLoaded = false; state = { phase: 'lobby' }; scores = {}; players = {}; roster = {}; prevPhase = null;
+    if (!eid) { E = null; return; }
+    E = Q.scope('events/' + eid); E.eid = eid;
+    evUnsubs.push(E.listen('players/' + pid, v => { me = v; meLoaded = true; render(); }));
+    evUnsubs.push(E.listen('roster', v => { roster = v || {}; if (!me) render(); }));
+    evUnsubs.push(E.listen('state', onState));
+    evUnsubs.push(E.listen('scores', v => { scores = v || {}; if (['reveal', 'ranking', 'spotlight'].includes(state.phase)) render(); }));
+    evUnsubs.push(E.listen('players', v => { players = v || {}; if (!me || ['ranking', 'spotlight'].includes(state.phase)) render(); }));
+  }
+  function onState(v) {
+    const before = prevPhase;
+    state = v || { phase: 'lobby' };
+    prevPhase = state.phase;
+    if (before === 'question' && state.phase === 'closed' && me) { Q.toast('締切です', 'warn'); Q.vibrate(80); }
+    if (before && before !== 'question' && state.phase === 'question' && me) Q.vibrate(40);
+    if (state.phase === 'spotlight' && state.spotPid === pid && before !== 'spotlight') Q.vibrate([60, 60, 60]);
+    bindQuestion(); render();
+  }
 
   function bindQuestion() {
+    curQ = state.q || null;               // 出題された問題だけが届く
     if (state.qid === boundQid) return;
     unsubs.forEach(f => f()); unsubs = [];
-    boundQid = state.qid; curQ = null; myAns = null; myRes = undefined;
-    if (!boundQid) return;
-    unsubs.push(Store.listen('questions/' + boundQid, v => { curQ = v; render(); }));
-    unsubs.push(Store.listen('answers/' + boundQid + '/' + pid, v => { myAns = v; render(); }));
-    unsubs.push(Store.listen('results/' + boundQid + '/' + pid, v => { myRes = v; render(); }));
+    boundQid = state.qid; myAns = null; myRes = undefined;
+    if (!boundQid || !E) return;
+    unsubs.push(E.listen('answers/' + boundQid + '/' + pid, v => { myAns = v; render(); }));
+    unsubs.push(E.listen('results/' + boundQid + '/' + pid, v => { myRes = v; render(); }));
   }
 
   const view = document.getElementById('view');
 
   function render() {
     if (drag) { pendingRender = true; return; }   // ドラッグ中は描き直さない
+    const scene = [meLoaded, !!me, state.phase, state.qid].join('|');
+    if (scene !== lastViewScene) {
+      lastViewScene = scene; view.classList.add('swap');
+      clearTimeout(swapTimer); swapTimer = setTimeout(() => view.classList.remove('swap'), 400);
+    }
     document.getElementById('meName').textContent = me ? me.name : '';
-    if (!meLoaded) { view.innerHTML = '<div class="center sub">接続中…</div>'; return; }
+    if (!liveLoaded) { view.dataset.h = ''; view.innerHTML = '<div class="center sub">接続中…</div>'; return; }
+    if (!live || !E) {
+      setView(`<div class="center"><div style="font-size:54px">⏳</div><div class="big">まだ始まっていません</div>
+        <p class="sub">司会が準備中です。このまま少し待つか、<br>始まってからもう一度QRを読み取ってください。</p></div>`);
+      return;
+    }
+    if (!meLoaded) { view.dataset.h = ''; view.innerHTML = '<div class="center sub">接続中…</div>'; return; }
     if (!me) return renderJoin();
     const ph = state.phase;
     if (ph === 'lobby' || !state.qid) {
-      view.innerHTML = `<div class="center"><div style="font-size:54px">🍻</div><div class="big">参加しました！</div>
+      view.dataset.h = ''; view.innerHTML = `<div class="center"><div style="font-size:54px">🍻</div><div class="big">参加しました！</div>
         <p class="sub">${esc(me.name)} さん、スクリーンを見ながら<br>問題が出るのを待ってください</p></div>`;
       return;
     }
     if (ph === 'ranking' || ph === 'spotlight') return renderRanking();
-    if (!curQ) { view.innerHTML = '<div class="center sub">読み込み中…</div>'; return; }
+    if (!curQ) { view.dataset.h = ''; view.innerHTML = '<div class="center sub">読み込み中…</div>'; return; }
     if (ph === 'question') return renderQuestion();
     if (ph === 'closed') {
-      view.innerHTML = `<div class="center"><div class="big">締切！</div><p class="sub">正解発表を待っています</p></div>` + myAnswerHtml();
+      setView(`<div class="center"><div class="big">締切！</div><p class="sub">正解発表を待っています</p></div>` + myAnswerHtml());
       return;
     }
     if (ph === 'reveal') return renderReveal();
   }
 
-  // ---------- 参加登録 ----------
+  // ---------- 参加登録（名簿があれば名前を選ぶだけ） ----------
   function renderJoin() {
-    if (document.getElementById('nameIn')) return;
-    view.innerHTML = `<div class="center"><div style="font-size:54px">🎉</div><div class="big">クイズに参加</div>
-      <p class="sub">名前を入れてください（スクリーンに表示されます）</p>
-      <input id="nameIn" maxlength="12" placeholder="例：たなか" value="${esc(Q.lsGet('name') || '')}" style="text-align:center;font-size:20px">
-      <button class="primary send" id="joinBtn">参加する</button><p class="err" id="joinErr"></p></div>`;
+    const list = Object.entries(roster).sort((a, b) => (a[1].order || 0) - (b[1].order || 0));
+    const taken = new Set(Object.entries(players).filter(([p]) => p !== pid).map(([, v]) => v.rid).filter(Boolean));
+    const free = list.filter(([rid]) => !taken.has(rid));
+    const sig = 'join|' + list.map(([r]) => r + (taken.has(r) ? 'x' : '')).join(',');
+    if (view.dataset.h === sig) return;
+    if (document.activeElement && document.activeElement.id === 'nameIn' && view.dataset.h && view.dataset.h.startsWith('join|')) return;
+    const last = Q.lsGet('name') || '';
+    let h = `<div class="center join"><div style="font-size:54px">🎉</div><div class="big">クイズに参加</div>`;
+    if (list.length) {
+      h += `<p class="sub">自分の名前をタップしてください</p>
+        <div class="roster">${list.map(([rid, r]) => `<button class="rname ${taken.has(rid) ? 'taken' : ''} ${r.name === last && !taken.has(rid) ? 'mine' : ''}" data-rid="${rid}" ${taken.has(rid) ? 'disabled' : ''}>${esc(r.name)}${taken.has(rid) ? '<small>参加済み</small>' : ''}</button>`).join('')}</div>
+        <details class="other"${free.length ? '' : ' open'}><summary>名簿にない場合</summary>`;
+    } else h += `<p class="sub">名前を入れてください（スクリーンに表示されます）</p>`;
+    h += `<input id="nameIn" maxlength="12" placeholder="例：たなか" value="${esc(last)}" style="text-align:center;font-size:20px">
+      <button class="primary send" id="joinBtn">この名前で参加する</button><p class="err" id="joinErr"></p>`;
+    if (list.length) h += `</details>`;
+    h += `</div>`;
+    view.innerHTML = h; view.dataset.h = sig;
+    const join = (name, rid) => {
+      Q.lsSet('name', name);
+      E.set('players/' + pid, rid ? { name, rid, joinedAt: Store.now() } : { name, joinedAt: Store.now() }).then(() => Q.toast('参加しました'));
+    };
+    view.querySelectorAll('[data-rid]').forEach(b => b.onclick = () => join(roster[b.dataset.rid].name, b.dataset.rid));
     const go = () => {
       const name = document.getElementById('nameIn').value.trim();
       if (!name) { document.getElementById('joinErr').textContent = '名前を入れてください'; return; }
-      Q.lsSet('name', name);
-      Store.set('players/' + pid, { name, joinedAt: Store.now() });
+      join(name, null);
     };
     document.getElementById('joinBtn').onclick = go;
     document.getElementById('nameIn').onkeydown = e => { if (e.key === 'Enter') go(); };
@@ -124,7 +185,7 @@
       h += `<div class="p-tiles">${opts.map((o, i) => `<button class="p-tile c${i} ${local.value === i ? 'sel' : (local.value != null ? 'unsel' : '')}" data-c="${i}">
         <span class="n">${i + 1}</span>${esc(o.text || '')}</button>`).join('')}</div>
         <div class="status ${myAns ? 'ok' : ''}">${myAns ? '✓ 送信済み（締切まで変更できます）' : 'タップで回答'}</div>`;
-      view.innerHTML = h; updateTimer(); return;
+      view.dataset.h = ''; view.innerHTML = h; updateTimer(); return;
     }
     if (q.type === 'order') h += orderHtml(q);
     if (q.type === 'match') h += matchHtml(q);
@@ -133,7 +194,7 @@
     h += `<div class="summary">${summaryHtml(q)}</div>
       <button class="primary send" id="sendBtn" ${full && !same ? '' : 'disabled'}>${same ? '✓ 送信済み' : myAns ? '変更して送信' : '送信'}</button>
       <div class="status ${same ? 'ok' : ''}">${same ? '締切まで変更できます' : myAns ? '未送信の変更があります' : full ? '確認して送信してください' : hintText(q)}</div>`;
-    view.innerHTML = h;
+    view.dataset.h = ''; view.innerHTML = h;
     if (q.type === 'match') drawLines();
     updateTimer();
   }
@@ -318,7 +379,8 @@
     const c = e.target.closest('[data-c]');
     if (c) {
       local.value = +c.dataset.c;
-      Store.set('answers/' + curQ.id + '/' + pid, { v: local.value, at: Store.now() });
+      E.set('answers/' + curQ.id + '/' + pid, { v: local.value, at: Store.now() }).then(() => Q.toast('回答を送信しました'));
+      Q.vibrate(15);
       renderQuestion(); return;
     }
     const del = e.target.closest('[data-del]');
@@ -329,7 +391,8 @@
       renderQuestion(); return;
     }
     if (e.target.id === 'sendBtn') {
-      Store.set('answers/' + curQ.id + '/' + pid, { v: local.value.slice(), at: Store.now() });
+      E.set('answers/' + curQ.id + '/' + pid, { v: local.value.slice(), at: Store.now() }).then(() => Q.toast('回答を送信しました'));
+      Q.vibrate(15);
     }
   });
 
@@ -361,8 +424,9 @@
         }).join('')}</div>`;
       }
     }
-    view.innerHTML = `<div class="result ${cls}"><div class="big">${big}</div><div style="font-size:22px;font-weight:800">${sub}</div></div>
-      ${keyHtml}<p class="center sub" style="padding:14px">現在の合計：<b style="color:var(--text)">${fmt(total)}点</b></p>`;
+    setView(`<div class="result ${cls}"><div class="big">${big}</div><div style="font-size:24px">${sub}</div></div>
+      ${keyHtml}<p class="center sub" style="padding:14px">現在の合計：<b style="color:var(--text)">${fmt(total)}点</b></p>`);
+    if (cls === 'ok' && celebrated !== q.id) { celebrated = q.id; Q.confetti({ count: 110 }); Q.vibrate([30, 40, 30]); }
   }
 
   function renderRanking() {
@@ -370,10 +434,12 @@
     const mine = rows.find(r => r.pid === pid);
     const spot = state.phase === 'spotlight' && state.spotPid === pid
       ? '<div class="spot-banner">📣 いまスクリーンに あなたの結果が映っています！</div>' : '';
-    view.innerHTML = spot + `<div class="center"><p class="sub">あなたの順位</p>
+    setView(spot + `<div class="center"><p class="sub">あなたの順位</p>
       <div class="myrank">${mine ? mine.rank + '位' : '-'}</div>
-      <p class="sub">${rows.length}人中　／　${fmt(mine ? mine.score : 0)}点</p></div>`;
+      <p class="sub">${rows.length}人中　／　${fmt(mine ? mine.score : 0)}点</p></div>`);
   }
+  // 同じ内容なら描き直さない（動きが何度も再生されないように）
+  function setView(h) { if (view.dataset.h !== h) { view.innerHTML = h; view.dataset.h = h; } }
 })();
 </script>
 </body>

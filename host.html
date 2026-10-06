@@ -4,12 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>進行・投影画面</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#1e1b3a">
 <link rel="stylesheet" href="style.css">
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="config.js"></script>
 <script src="common.js"></script>
+<script src="sound.js"></script>
 </head>
 <body class="host">
 <div id="stage">
@@ -26,28 +30,49 @@
   <button id="btnLobby">参加QR</button>
   <select id="selP"></select><button id="btnSpot">この人の結果</button>
   <select id="selQ"></select><button id="btnGo">この問題を出す</button>
+  <span class="sep"></span>
+  <button id="btnBgm" class="tgl" aria-pressed="true">BGM</button>
+  <button id="btnSfx" class="tgl" aria-pressed="true">効果音</button>
+  <span class="sep"></span>
+  <span class="evname" id="evName"></span>
+  <button id="btnSwitch">開催を切り替え</button>
   <button id="btnReset" class="danger">リセット</button>
   <a href="admin.html" target="_blank">問題作成 ↗</a>
-  <span class="hint">Space/→：次へ　H：この操作バーを隠す</span>
+  <span class="hint">Space/→：次へ　H：操作バーを隠す　M：BGM</span>
 </div>
 
 <script>
 (function () {
   const { Store, TYPES, LETTERS, esc, fmt, toArr, sortedQuestions, slotLabel } = Q;
-  document.title = Q.C.APP_TITLE + '｜投影';
   const $ = id => document.getElementById(id);
-  const S = { state: { phase: 'lobby' }, questions: {}, players: {}, answers: {}, keys: {}, results: {}, scores: {} };
-  let lastSig = '', closing = false;
+  const S = { state: { phase: 'lobby' }, questions: {}, players: {}, answers: {}, keys: {}, results: {}, scores: {}, roster: {} };
+  let E = null, EID = '', META = {};
+  let lastSig = '', closing = false, lastScene = '', loaded = false, knownPids = null, allDoneFor = '', confettiFor = '';
+  let soundScene = '', lastTickSec = null, lastLive = '';
 
   Q.demoBanner();
-  Q.pinGate(start);
+  Q.eventGate(start, 'host');
 
-  function start() {
-    ['state', 'questions', 'players', 'answers', 'keys', 'results', 'scores'].forEach(k => {
-      Store.listen(k, v => { S[k] = v || (k === 'state' ? { phase: 'lobby' } : {}); render(); });
+  function start(eid, meta) {
+    EID = eid; META = meta || {};
+    E = Q.scope('events/' + eid);
+    Q.setImageBase('events/' + eid + '/images/');
+    ['state', 'questions', 'players', 'answers', 'keys', 'results', 'scores', 'roster'].forEach(k => {
+      E.listen(k, v => { S[k] = v || (k === 'state' ? { phase: 'lobby' } : {}); render(); });
     });
+    Store.listen('catalog/' + eid, m => {
+      META = m || META;
+      document.title = (META.title || '') + '｜' + Q.C.APP_TITLE;
+      $('evName').textContent = META.title || '';
+      const lv = JSON.stringify({ eid, title: META.title || '' });
+      if (lv !== lastLive) { lastLive = lv; Store.update('live', JSON.parse(lv)); }   // 参加者のスマホにこの開催を知らせる
+      lastSig = ''; render();
+    });
+    E.listen('bgm', v => Sound.setFile(v || ''));
     setInterval(tick, 250);
+    setTimeout(() => { loaded = true; }, 1500);
     bindControls();
+    if (!Sound.ready()) setTimeout(() => { if (!Sound.ready()) Q.toast('音を出すには、画面を一度クリックしてください', 'info'); }, 1200);
   }
 
   const qs = () => sortedQuestions(S.questions);
@@ -56,13 +81,15 @@
   const answersOf = qid => S.answers[qid] || {};
   const isRevealed = qid => !!(S.state.revealed && S.state.revealed[qid]);
   const joinUrl = () => new URL('index.html', location.href).href;
+  const isFinal = () => { const l = qs(); return l.length > 0 && l.every(x => isRevealed(x.id)); };
 
   // ========== 進行 ==========
   function showQuestion(idx) {
     const q = qs()[idx]; if (!q) return;
-    return Store.update('state', { phase: 'question', qid: q.id, startedAt: Store.now(), revealKey: null });
+    // 参加者のスマホには、出題した問題だけをコピーして渡す（正解は渡さない）
+    return E.update('state', { phase: 'question', qid: q.id, q, startedAt: Store.now(), revealKey: null });
   }
-  function doClose() { return Store.update('state', { phase: 'closed' }); }
+  function doClose() { return E.update('state', { phase: 'closed' }); }
   function doReveal() {
     const q = curQ(); if (!q) return;
     const key = S.keys[q.id];
@@ -71,7 +98,7 @@
     const all = Object.assign({}, S.results, { [q.id]: res });
     const totals = {};
     Object.values(all).forEach(r => Object.entries(r || {}).forEach(([pid, p]) => { totals[pid] = (totals[pid] || 0) + p; }));
-    return Store.update('', {
+    return E.update('', {
       ['results/' + q.id]: res, scores: totals,
       'state/phase': 'reveal', 'state/revealKey': key == null ? null : key,
       ['state/revealed/' + q.id]: true
@@ -82,7 +109,7 @@
     if (ph === 'lobby') return showQuestion(i >= 0 && isRevealed(S.state.qid) ? i + 1 : Math.max(i, 0));
     if (ph === 'question') return doClose();
     if (ph === 'closed') return doReveal();
-    if (ph === 'reveal') return Store.update('state', { phase: 'ranking' });
+    if (ph === 'reveal') return E.update('state', { phase: 'ranking' });
     if ((ph === 'ranking' || ph === 'spotlight') && i + 1 < n) return showQuestion(i + 1);
   }
   function nextLabel() {
@@ -96,22 +123,29 @@
     return '▶ 次へ';
   }
 
+  function setTgl(btn, on) { btn.setAttribute('aria-pressed', on ? 'true' : 'false'); }
   function bindControls() {
     $('btnNext').onclick = next;
     $('btnClose').onclick = doClose;
     $('btnReveal').onclick = doReveal;
-    $('btnRank').onclick = () => Store.update('state', { phase: 'ranking' });
-    $('btnLobby').onclick = () => Store.update('state', { phase: 'lobby' });
-    $('btnSpot').onclick = () => { const p = $('selP').value; if (p) Store.update('state', { phase: 'spotlight', spotPid: p }); };
+    $('btnRank').onclick = () => E.update('state', { phase: 'ranking' });
+    $('btnLobby').onclick = () => E.update('state', { phase: 'lobby' });
+    $('btnSpot').onclick = () => { const p = $('selP').value; if (p) E.update('state', { phase: 'spotlight', spotPid: p }); };
     $('btnGo').onclick = () => { const i = +$('selQ').value; if (i >= 0) showQuestion(i); };
+    $('btnBgm').onclick = () => { setTgl($('btnBgm'), Sound.toggleBgm()); };
+    $('btnSfx').onclick = () => { setTgl($('btnSfx'), Sound.toggleSfx()); };
+    setTgl($('btnBgm'), Sound.bgmOn); setTgl($('btnSfx'), Sound.sfxOn);
+    $('btnSwitch').onclick = () => { if (confirm('ほかの開催に切り替えますか？')) { Sound.bgm(null); Q.leaveEvent(); } };
     $('btnReset').onclick = () => {
-      if (!confirm('参加者・回答・得点をすべて消して最初からにしますか？（問題は残ります）')) return;
-      Store.update('', { players: null, answers: null, results: null, scores: null, state: { phase: 'lobby' } });
+      if (!confirm('この開催の参加者・回答・得点をすべて消して最初からにしますか？（問題と名簿は残ります）')) return;
+      E.update('', { players: null, answers: null, results: null, scores: null, state: { phase: 'lobby' } });
+      confettiFor = ''; allDoneFor = '';
     };
     document.addEventListener('keydown', e => {
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
       if (e.key === ' ' || e.key === 'ArrowRight') { e.preventDefault(); next(); }
       if (e.key === 'h' || e.key === 'H') $('controls').classList.toggle('hidden');
+      if (e.key === 'm' || e.key === 'M') setTgl($('btnBgm'), Sound.toggleBgm());
     });
   }
 
@@ -119,22 +153,62 @@
     const q = curQ(), st = S.state, el = $('timer');
     if (st.phase === 'question' && q && q.timeLimit > 0) {
       const rem = Math.ceil((st.startedAt + q.timeLimit * 1000 - Store.now()) / 1000);
-      el.textContent = '⏱ ' + Math.max(0, rem);
+      if (!el.firstChild) el.innerHTML = '<svg viewBox="0 0 40 40"><circle class="bg" cx="20" cy="20" r="17" fill="none" stroke-width="4"/><circle class="fg" cx="20" cy="20" r="17" fill="none" stroke-width="4" stroke-linecap="round" stroke-dasharray="106.8"/></svg><span></span>';
+      const left = Math.max(0, st.startedAt + q.timeLimit * 1000 - Store.now()) / (q.timeLimit * 1000);
+      el.querySelector('.fg').style.strokeDashoffset = (106.8 * (1 - left)).toFixed(1);
+      el.querySelector('span').textContent = Math.max(0, rem);
       el.classList.toggle('warn', rem <= 5);
+      if (rem <= 5 && rem >= 1 && rem !== lastTickSec) { lastTickSec = rem; Sound.play('tick', rem === 1); }
       if (rem <= 0 && !closing) { closing = true; Promise.resolve(doClose()).finally(() => { closing = false; }); }
-    } else el.textContent = '';
+    } else { lastTickSec = null; if (el.firstChild) el.innerHTML = ''; }
+  }
+
+  // ========== 音（場面が変わったときだけ鳴らす） ==========
+  function sound(ph, q) {
+    const scene = ph + '|' + (q ? q.id : '') + '|' + (ph === 'spotlight' ? S.state.spotPid : '');
+    if (scene === soundScene) return;
+    const first = !soundScene;
+    soundScene = scene;
+    if (ph === 'lobby' || ph === 'ranking' || ph === 'spotlight') Sound.bgm('party');
+    else if (ph === 'question') Sound.bgm('think');
+    else Sound.bgm(null);
+    if (first) return;                         // 開いた直後は効果音を鳴らさない
+    if (ph === 'question') Sound.play('question');
+    if (ph === 'closed') Sound.play('buzzer');
+    if (ph === 'reveal') Sound.play('reveal');
+    if (ph === 'spotlight') Sound.play('spot');
+    if (ph === 'ranking' && isFinal()) Sound.play('fanfare');
   }
 
   // ========== 描画 ==========
   function render() {
+    if (!E) return;
     const st = S.state, q = curQ(), list = qs();
     const ph = q || ['lobby', 'ranking', 'spotlight'].includes(st.phase) ? st.phase : 'lobby';
-    const sig = [ph, st.qid, st.phase === 'reveal' ? JSON.stringify(S.results[st.qid] || {}) : '',
+    const sig = [ph, st.qid, META.title, st.phase === 'reveal' ? JSON.stringify(S.results[st.qid] || {}) : '',
       ph === 'ranking' || ph === 'spotlight' ? JSON.stringify(S.scores) + JSON.stringify(S.players) + JSON.stringify(st.revealed || {}) + st.spotPid : '',
       q ? JSON.stringify(q) : ''].join('|');
     if (sig !== lastSig) { lastSig = sig; renderMain(ph, q, list); }
     renderLive(ph, q, list);
+    notify(ph, q);
     renderControls(list);
+    sound(ph, q);
+  }
+
+  // 参加・全員回答のお知らせ
+  function notify(ph, q) {
+    const pids = Object.keys(S.players);
+    if (knownPids && loaded) {
+      const fresh = pids.filter(p => !knownPids.has(p));
+      if (fresh.length > 3) Q.toast(`${fresh.length}人が参加しました`, 'join');
+      else fresh.forEach(p => Q.toast(`${S.players[p].name} さんが参加しました`, 'join'));
+      if (fresh.length) Sound.play('join');
+    }
+    knownPids = new Set(pids);
+    if (ph === 'question' && q && pids.length) {
+      const ans = answersOf(q.id);
+      if (pids.every(p => ans[p]) && allDoneFor !== q.id) { allDoneFor = q.id; Q.toast('全員が回答しました', 'ok'); }
+    }
   }
 
   function renderControls(list) {
@@ -160,13 +234,27 @@
       $('chips').innerHTML = '';
       const pc = $('pcount'); if (pc) pc.textContent = pids.length;
       const lc = $('lobbyChips');
-      if (lc) lc.innerHTML = pids.map(p => `<span class="chip">${esc(S.players[p].name)}</span>`).join('');
+      if (lc) {
+        const have = new Set([...lc.children].filter(c => c.dataset.pid).map(c => c.dataset.pid));
+        [...lc.children].forEach(c => { if (c.dataset.pid && !S.players[c.dataset.pid]) c.remove(); });
+        pids.filter(p => !have.has(p)).forEach(p => {
+          const c = document.createElement('span');
+          c.className = 'chip' + (loaded ? ' new' : ''); c.dataset.pid = p; c.textContent = S.players[p].name;
+          lc.insertBefore(c, lc.querySelector('.chip.wait'));
+        });
+        // 名簿にいてまだ参加していない人（薄く表示）
+        const joinedNames = new Set(pids.map(p => S.players[p].name));
+        const waiting = Object.values(S.roster).sort((a, b) => (a.order || 0) - (b.order || 0)).map(r => r.name).filter(n => !joinedNames.has(n));
+        const wh = waiting.map(n => `<span class="chip wait">${esc(n)}</span>`).join('');
+        if (lc.dataset.w !== wh) { lc.querySelectorAll('.chip.wait').forEach(c => c.remove()); lc.insertAdjacentHTML('beforeend', wh); lc.dataset.w = wh; }
+        const rc = $('rcount'); if (rc) rc.textContent = Object.keys(S.roster).length ? `（名簿 ${Object.keys(S.roster).length}人）` : '';
+      }
       return;
     }
     if (q && (ph === 'question' || ph === 'closed')) {
       const ans = answersOf(q.id);
       const n = pids.filter(p => ans[p]).length;
-      $('answered').textContent = `回答 ${n} / ${pids.length}人`;
+      $('answered').innerHTML = `回答<b>${n}</b>/ ${pids.length}人`;
       $('chips').innerHTML = pids.map(p => `<span class="chip ${ans[p] ? 'done' : ''}">${esc(S.players[p].name)}</span>`).join('');
     } else { $('answered').textContent = ''; $('chips').innerHTML = ''; }
   }
@@ -178,23 +266,36 @@
     const m = $('main');
     if (ph === 'lobby') {
       m.innerHTML = `<div class="lobby">
-        <div><h1>${esc(Q.C.APP_TITLE)}</h1><p style="font-size:3vh">スマホでQRを読み取って参加！</p>
+        <div><div class="brand-sm"><img src="favicon.svg" alt="">${esc(Q.C.APP_TITLE)}</div>
+          <h1>${esc(META.title || '')}</h1><p>スマホでQRを読み取って参加！</p>
           <div class="qrwrap"><div id="qr"></div></div><p class="url">${esc(joinUrl())}</p></div>
-        <div><h2>参加者 <span id="pcount">0</span>人</h2><div id="lobbyChips" class="chips"></div></div></div>`;
-      if (window.QRCode) new QRCode($('qr'), { text: joinUrl(), width: Math.round(innerHeight * 0.38), height: Math.round(innerHeight * 0.38) });
+        <div><h2>参加者 <span id="pcount">0</span>人 <small id="rcount" class="sub"></small></h2><div id="lobbyChips" class="chips"></div></div></div>`;
+      if (window.QRCode) new QRCode($('qr'), { text: joinUrl(), width: Math.round(innerHeight * 0.36), height: Math.round(innerHeight * 0.36) });
       else $('qr').textContent = 'QRライブラリを読み込めませんでした';
+      lastScene = 'lobby';
       return;
     }
-    if (ph === 'ranking') { m.innerHTML = rankingHtml(list); return; }
+    if (ph === 'ranking') {
+      m.innerHTML = rankingHtml(list); Q.countUp(m);
+      if (isFinal() && confettiFor !== 'final') { confettiFor = 'final'; setTimeout(() => Q.confetti({ count: 220, duration: 3500 }), 600); }
+      lastScene = 'ranking'; return;
+    }
     if (ph === 'spotlight') { m.innerHTML = spotlightHtml(list); return; }
     if (!q) { m.innerHTML = ''; return; }
 
     const head = `<div class="qtitle">${esc(q.title)}</div>`;
+    const scene = ph + '|' + q.id;
+    m.classList.remove('enter');
     if (ph === 'question' || ph === 'closed') {
       m.innerHTML = head + questionHtml(q) + (ph === 'closed' ? '<div class="overlay"><span>締切！</span></div>' : '');
+      if (ph === 'question' && scene !== lastScene) { void m.offsetWidth; m.classList.add('enter'); }
     } else if (ph === 'reveal') {
       m.innerHTML = head + revealHtml(q);
+      if (scene !== lastScene && q.type !== 'choice') { void m.offsetWidth; m.classList.add('enter'); }
+      requestAnimationFrame(() => m.querySelectorAll('[data-w]').forEach(b => { b.style.width = b.dataset.w; }));
+      Q.countUp(m);
     }
+    lastScene = scene;
     Q.hydrateImages(m);
   }
 
@@ -237,9 +338,9 @@
       const winners = Object.keys(res).filter(p => res[p] >= 1);
       return `<div class="tiles" style="grid-template-columns:repeat(${opts.length <= 4 ? 2 : 3},1fr)">
         ${opts.map((o, i) => `<div class="tile c${i} ${Number(key) === i ? 'correct' : 'dim'}"><span class="num">${i + 1}</span>${img(o.img)}
-          ${o.text ? `<div class="txt">${esc(o.text)}</div>` : ''}<span class="cnt">${cnt[i]}人</span>
-          <span class="bar" style="width:${pct(cnt[i], answered)}"></span></div>`).join('')}</div>
-        <div class="perfect"><span class="pc">正解者 <b>${winners.length}人</b> / ${answered}人</span>${winners.length && winners.length <= 30 ? '<span class="pn">' + names(winners) + '</span>' : ''}</div>`;
+          ${o.text ? `<div class="txt">${esc(o.text)}</div>` : ''}<span class="cnt"><span data-count="${cnt[i]}">0</span>人</span>
+          <span class="bar" style="width:0" data-w="${pct(cnt[i], answered)}"></span></div>`).join('')}</div>
+        <div class="perfect"><span class="pc">正解者<b data-count="${winners.length}">0</b>人 / ${answered}人</span>${winners.length && winners.length <= 30 ? '<span class="pn">' + names(winners) + '</span>' : ''}</div>`;
     }
     const items = toArr(q.items), slots = toArr(q.slots), k = toArr(key);
     const rate = i => pct(Object.values(ans).filter(a => a && toArr(a.v)[i] != null && Number(toArr(a.v)[i]) === Number(k[i])).length, answered);
@@ -259,7 +360,7 @@
     }
     const perfect = Object.keys(res).filter(p => res[p] >= 0.999);
     const avg = answered ? Object.values(res).reduce((a, b) => a + b, 0) / answered : 0;
-    return h + `<div class="perfect"><span class="pc">全問正解 <b>${perfect.length}人</b> / ${answered}人</span><span class="pc sub2">平均 ${fmt(avg)}点</span>${perfect.length && perfect.length <= 30 ? '<span class="pn">' + names(perfect) + '</span>' : ''}</div>`;
+    return h + `<div class="perfect"><span class="pc">全問正解<b data-count="${perfect.length}">0</b>人 / ${answered}人</span><span class="pc sub2">平均 ${fmt(avg)}点</span>${perfect.length && perfect.length <= 30 ? '<span class="pn">' + names(perfect) + '</span>' : ''}</div>`;
   }
 
   // 選んだ1人の結果（各問の回答・得点・順位）
@@ -277,7 +378,7 @@
       const a = (answersOf(q.id)[pid] || {}).v, pt = (S.results[q.id] || {})[pid];
       const cls = pt == null ? 'none' : pt >= 0.999 ? 'ok' : pt > 0 ? 'part' : 'ng';
       const mark = { none: '－', ok: '○', part: '△', ng: '×' }[cls];
-      return `<div class="srow ${cls}"><span class="sq">Q${list.indexOf(q) + 1}</span><span class="st">${esc(q.title)}</span>
+      return `<div class="srow ${cls}" style="animation-delay:${0.15 + i * 0.12}s"><span class="sq">Q${list.indexOf(q) + 1}</span><span class="st">${esc(q.title)}</span>
         <span class="sa">${answerText(q, a)}</span><span class="sm">${mark}</span><span class="sp">${fmt(pt || 0)}点</span></div>`;
     };
     return `<div class="spot"><div class="spot-head"><div class="spot-name">📣 ${esc(p.name)} さんの結果</div>
@@ -287,9 +388,8 @@
 
   function rankingHtml(list) {
     const done = list.filter(q => isRevealed(q.id)).length;
-    const isFinal = list.length > 0 && done === list.length;
     const rows = Q.buildRanking(S.players, S.scores).slice(0, 10);
-    return `<div class="rank"><h1>${isFinal ? '🏆 最終結果' : '途中経過'} <small>（${done}問終了・${Object.keys(S.players).length}人）</small></h1>
+    return `<div class="rank"><h1>${isFinal() ? '🏆 最終結果' : '途中経過'} <small>（${done}問終了・${Object.keys(S.players).length}人）</small></h1>
       <ol>${rows.map((r, i) => `<li class="${r.rank <= 3 ? 'top' + r.rank : ''}" style="animation-delay:${(rows.length - i) * 0.08}s">
         <span class="r">${r.rank}位</span><span>${esc(r.name)}</span><span class="s">${fmt(r.score)}点</span></li>`).join('')}</ol></div>`;
   }

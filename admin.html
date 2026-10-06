@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>問題作成</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#1e1b3a">
 <link rel="stylesheet" href="style.css">
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
@@ -11,12 +14,15 @@
 <script src="common.js"></script>
 </head>
 <body class="admin">
-<div class="p-head"><span id="appTitle"></span><span><a href="host.html" target="_blank">進行・投影画面を開く ↗</a></span></div>
+<div class="p-head"><span id="appTitle"></span><span class="head-links"><button id="btnSwitch" class="ghost">開催を切り替え</button><a href="host.html" target="_blank">進行・投影画面を開く ↗</a></span></div>
 <div class="a-wrap">
+  <div class="a-side">
+  <div class="a-panel" id="evPanel"></div>
   <div class="a-panel">
     <h2>問題一覧 <span class="sub" id="qcount"></span></h2>
     <div class="qlist" id="qlist"></div>
     <div class="a-actions"><button class="primary" id="btnNew">＋ 新しい問題</button></div>
+  </div>
   </div>
   <div class="a-panel" id="editor"></div>
 </div>
@@ -24,22 +30,111 @@
 <script>
 (function () {
   const { Store, TYPES, LETTERS, CIRCLED, esc, uid, toArr, sortedQuestions } = Q;
-  document.title = Q.C.APP_TITLE + '｜問題作成';
+  document.title = '問題作成｜' + Q.C.APP_TITLE;
   document.getElementById('appTitle').textContent = Q.C.APP_TITLE + '｜問題作成';
 
-  let questions = {}, keys = {};
-  let draft = null;
+  let questions = {}, keys = {}, roster = {}, players = {}, meta = {}, catalog = {}, hasBgm = false;
+  let draft = null, E = null, EID = '', lastCounts = '';
 
   Q.demoBanner();
-  Q.pinGate(start);
+  Q.eventGate(start, 'admin');
 
-  function start() {
-    Store.listen('questions', v => { questions = v || {}; renderList(); });
-    Store.listen('keys', v => { keys = v || {}; });
+  function start(eid) {
+    EID = eid; E = Q.scope('events/' + eid);
+    Q.setImageBase('events/' + eid + '/images/');
+    E.listen('questions', v => { questions = v || {}; renderList(); syncCounts(); });
+    E.listen('keys', v => { keys = v || {}; });
+    E.listen('roster', v => { roster = v || {}; renderEvent(); syncCounts(); });
+    E.listen('players', v => { players = v || {}; });
+    E.listen('bgmName', v => { hasBgm = v || ''; renderEvent(); });
+    Store.listen('catalog', v => { catalog = v || {}; meta = catalog[eid] || {}; renderEvent(); document.title = (meta.title || '') + '｜問題作成'; });
     document.getElementById('btnNew').onclick = () => { draft = blankDraft('choice'); renderEditor(); };
+    document.getElementById('btnSwitch').onclick = () => Q.leaveEvent();
     draft = blankDraft('choice');
     renderEditor();
   }
+  // 開催一覧に出す件数を更新
+  function syncCounts() {
+    const qn = Object.keys(questions).length, rn = Object.keys(roster).length;
+    const sig = qn + '/' + rn;
+    if (meta.title && sig !== lastCounts && (meta.qCount !== qn || meta.rosterCount !== rn)) { lastCounts = sig; Store.update('catalog/' + EID, { qCount: qn, rosterCount: rn }); }
+  }
+
+  // ---------- 開催の設定 ----------
+  let evOpen = false;
+  function renderEvent() {
+    const el = document.getElementById('evPanel');
+    if (!meta.title) { el.innerHTML = ''; return; }
+    const names = Object.entries(roster).sort((a, b) => (a[1].order || 0) - (b[1].order || 0));
+    const others = Object.entries(catalog).filter(([id]) => id !== EID).sort((a, b) => (b[1].createdAt || 0) - (a[1].createdAt || 0));
+    const focused = document.activeElement && el.contains(document.activeElement) && document.activeElement.tagName !== 'BUTTON';
+    if (focused) return;
+    el.innerHTML = `<div class="ev-head"><div><div class="sub" style="font-size:12px">編集中の開催</div><h2 class="ev-title">${esc(meta.title)}</h2>
+        <div class="sub" style="font-size:13px">問題 ${Object.keys(questions).length}問 ・ 名簿 ${names.length}人</div></div>
+        <button id="evToggle">${evOpen ? '閉じる' : '設定'}</button></div>
+      ${evOpen ? `
+      <div class="field"><label>タイトル（スクリーンとスマホに表示）</label>
+        <div class="row"><input id="evTitle" maxlength="30" value="${esc(meta.title)}"><button id="evTitleSave">変更</button></div></div>
+      <div class="field"><label>パスワードの変更</label>
+        <div class="row"><input id="evPass" type="password" autocomplete="new-password" placeholder="新しいパスワード（4文字以上）"><button id="evPassSave">変更</button></div></div>
+      <div class="field"><label>参加者名簿（${names.length}人）</label>
+        <div class="rchips">${names.map(([rid, r]) => `<span class="rchip">${esc(r.name)}<button data-delr="${rid}" aria-label="${esc(r.name)}を削除">×</button></span>`).join('') || '<span class="sub">名簿なし（当日その場で名前を入力して参加）</span>'}</div>
+        <textarea id="evAdd" rows="2" placeholder="名前を追加（改行・読点・カンマ区切りでまとめて入力できます）"></textarea>
+        <div class="row"><button id="evAddBtn">名簿に追加</button>${names.length ? '<button id="evClear" class="danger">名簿を空にする</button>' : ''}</div>
+        ${others.length ? `<div class="row" style="margin-top:8px"><select id="evFrom">${others.map(([id, m]) => `<option value="${id}">${esc(m.title)}</option>`).join('')}</select><button id="evFromBtn">から引き継ぐ</button></div>
+        <p class="mini">選んだ開催の名簿と、実際に参加した人の名前をまとめて追加します（同じ名前は1つにまとめます）。</p>` : ''}</div>
+      <div class="field"><label>BGM（任意）</label>
+        ${hasBgm ? `<div class="row"><span class="sub">🎵 ${esc(hasBgm)}</span><button id="evBgmDel">削除</button></div>`
+          : `<label class="up file">🎵 音源ファイルを選ぶ（mp3など・4MBまで）<input type="file" accept="audio/*" id="evBgm"></label>`}
+        <p class="mini">登録すると、受付中と順位表示のBGMがこの音源になります。未登録なら自動で作った音楽が流れます。著作権に問題のない音源を使ってください。</p></div>
+      <div class="field"><button id="evDel" class="danger">この開催を削除</button></div>` : ''}`;
+    const $ = id => document.getElementById(id);
+    $('evToggle').onclick = () => { evOpen = !evOpen; renderEvent(); };
+    if (!evOpen) return;
+    $('evTitleSave').onclick = async () => {
+      const t = $('evTitle').value.trim(); if (!t) return toast('タイトルを入れてください', 'warn');
+      await Store.update('catalog/' + EID, { title: t }); toast('タイトルを変更しました');
+    };
+    $('evPassSave').onclick = async () => {
+      const p = $('evPass').value; if (p.length < 4) return toast('パスワードは4文字以上にしてください', 'warn');
+      await Store.update('catalog/' + EID, { passHash: await Q.hashPass(p) });
+      try { sessionStorage.setItem('quiz_' + (Q.C.ROOM_ID || 'nomikai') + '_evh', await Q.hashPass(p)); } catch (e) {}
+      $('evPass').value = ''; toast('パスワードを変更しました');
+    };
+    const addNames = async list => {
+      const have = new Set(Object.values(roster).map(r => r.name));
+      const add = [...new Set(list.map(n => n.trim()).filter(n => n && !have.has(n)))];
+      if (!add.length) return toast('追加する名前がありません（同じ名前は追加しません）', 'info');
+      const start = Object.keys(roster).length, upd = {};
+      Object.entries(Q.rosterFromNames(add, start)).forEach(([k, v]) => { upd[k] = v; });
+      await E.update('roster', upd); toast(`${add.length}人を名簿に追加しました`);
+    };
+    $('evAddBtn').onclick = () => { const v = $('evAdd').value; $('evAdd').value = ''; addNames(v.split(/[\n,、，]+/)); };
+    if ($('evClear')) $('evClear').onclick = async () => { if (confirm('名簿を空にしますか？')) { await E.set('roster', null); toast('名簿を空にしました', 'info'); } };
+    if ($('evFromBtn')) $('evFromBtn').onclick = async () => {
+      const src = await Store.get('events/' + $('evFrom').value);
+      addNames(Q.rosterNames(src));
+    };
+    el.querySelectorAll('[data-delr]').forEach(b => b.onclick = () => E.set('roster/' + b.dataset.delr, null));
+    if ($('evBgm')) $('evBgm').onchange = async e => {
+      const f = e.target.files[0]; if (!f) return;
+      if (f.size > 4 * 1024 * 1024) return toast('4MBまでの音源ファイルを選んでください', 'warn');
+      const url = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(f); });
+      await E.update('', { bgm: url, bgmName: f.name }); toast('BGMを登録しました');
+    };
+    if ($('evBgmDel')) $('evBgmDel').onclick = async () => { await E.update('', { bgm: null, bgmName: null }); toast('BGMを削除しました', 'info'); };
+    $('evDel').onclick = async () => {
+      const t = prompt(`「${meta.title}」を問題・名簿・回答ごと削除します。元に戻せません。\n削除する場合は「削除」と入力してください。`);
+      if (t !== '削除') return;
+      const lv = await Store.get('live');
+      await Store.update('', Object.assign({ ['events/' + EID]: null, ['catalog/' + EID]: null }, lv && lv.eid === EID ? { live: null } : {}));
+      Q.leaveEvent();
+    };
+  }
+  document.getElementById('evPanel').addEventListener('focusout', () => setTimeout(() => {
+    const el = document.getElementById('evPanel');
+    if (!el.contains(document.activeElement)) renderEvent();
+  }, 0));
 
   // ---------- 下書き（編集用の形）----------
   function blankEntry() { return { text: '', img: '', photo: '', group: 0 }; }
@@ -147,7 +242,8 @@
       if (!confirm(`「${q.title}」を削除しますか？`)) return;
       const upd = { ['questions/' + q.id]: null, ['keys/' + q.id]: null };
       imagesOf(q).forEach(id => { upd['images/' + id] = null; });
-      await Store.update('', upd);
+      await E.update('', upd);
+      toast('問題を削除しました', 'info');
       if (draft && draft.id === q.id) { draft = blankDraft('choice'); renderEditor(); }
     }
     if (b.dataset.op === 'up' || b.dataset.op === 'down') {
@@ -156,7 +252,7 @@
       qs.forEach((x, n) => { upd['questions/' + x.id + '/order'] = n; });
       upd['questions/' + qs[i].id + '/order'] = j;
       upd['questions/' + qs[j].id + '/order'] = i;
-      await Store.update('', upd);
+      await E.update('', upd);
     }
   });
 
@@ -243,10 +339,11 @@
       try {
         const data = await Q.compressImage(f);
         const id = 'img_' + uid();
-        await Store.set('images/' + id, data);
+        await E.set('images/' + id, data);
         draft[t.dataset.list][+t.dataset.i][t.dataset.k] = id;
         renderEditor();
-      } catch (err) { alert('画像を読み込めませんでした'); }
+        toast('画像を追加しました', 'info');
+      } catch (err) { toast('画像を読み込めませんでした。JPEGかPNGを選んでください', 'warn'); }
       return;
     }
     if (t.type === 'radio') { draft.correct = +t.value; return; }
@@ -287,18 +384,15 @@
       const old = questions[q.id];
       q.order = old ? (old.order || 0) : Object.keys(questions).length
         ? Math.max(...Object.values(questions).map(x => x.order || 0)) + 1 : 0;
-      await Store.update('', { ['questions/' + q.id]: q, ['keys/' + q.id]: key });
-      toast('保存しました');
+      await E.update('', { ['questions/' + q.id]: q, ['keys/' + q.id]: key });
+      toast('問題を保存しました');
       draft = blankDraft(draft.type);
       renderList();
     }
     renderEditor();
   });
 
-  function toast(msg) {
-    const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
-    document.body.appendChild(t); setTimeout(() => t.remove(), 1600);
-  }
+  const toast = (msg, type) => Q.toast(msg, type);
 })();
 </script>
 </body>
