@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>問題作成</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+</head>
+<body class="admin">
+<div class="p-head"><span id="appTitle"></span><span><a href="host.html" target="_blank">進行・投影画面を開く ↗</a></span></div>
+<div class="a-wrap">
+  <div class="a-panel">
+    <h2>問題一覧 <span class="sub" id="qcount"></span></h2>
+    <div class="qlist" id="qlist"></div>
+    <div class="a-actions"><button class="primary" id="btnNew">＋ 新しい問題</button></div>
+  </div>
+  <div class="a-panel" id="editor"></div>
+</div>
+
+<script>
+(function () {
+  const { Store, TYPES, LETTERS, CIRCLED, esc, uid, toArr, sortedQuestions } = Q;
+  document.title = Q.C.APP_TITLE + '｜問題作成';
+  document.getElementById('appTitle').textContent = Q.C.APP_TITLE + '｜問題作成';
+
+  let questions = {}, keys = {};
+  let draft = null;
+
+  Q.demoBanner();
+  Q.pinGate(start);
+
+  function start() {
+    Store.listen('questions', v => { questions = v || {}; renderList(); });
+    Store.listen('keys', v => { keys = v || {}; });
+    document.getElementById('btnNew').onclick = () => { draft = blankDraft('choice'); renderEditor(); };
+    draft = blankDraft('choice');
+    renderEditor();
+  }
+
+  // ---------- 下書き（編集用の形）----------
+  function blankEntry() { return { text: '', img: '', photo: '', group: 0 }; }
+  function blankDraft(type) {
+    return {
+      id: null, type, title: '', timeLimit: 30, shuffle: true,
+      options: [{ text: '', img: '' }, { text: '', img: '' }], correct: 0,
+      entries: [blankEntry(), blankEntry(), blankEntry(), blankEntry()],
+      groups: ['グループ1', 'グループ2']
+    };
+  }
+  function toDraft(q, key) {
+    const d = blankDraft(q.type);
+    d.id = q.id; d.title = q.title || ''; d.timeLimit = q.timeLimit || 0;
+    const items = toArr(q.items), slots = toArr(q.slots), k = toArr(key);
+    if (q.type === 'choice') {
+      d.options = toArr(q.options).map(o => ({ text: o.text || '', img: o.img || '' }));
+      d.correct = Number(key) || 0;
+    } else if (q.type === 'order') {
+      d.entries = items.map((it, j) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', _r: Number(k[j]) }))
+        .sort((a, b) => a._r - b._r).map(({ _r, ...e }) => e);
+    } else if (q.type === 'match') {
+      d.entries = items.map((it, i) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', photo: (slots[Number(k[i])] || {}).img || '' }));
+    } else if (q.type === 'group') {
+      d.groups = slots.map(s => s.text || '');
+      d.entries = items.map((it, i) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', group: Number(k[i]) || 0 }));
+      d.shuffle = false;
+    }
+    return d;
+  }
+  function shuffled(n, doShuffle) {
+    const a = [...Array(n).keys()];
+    if (doShuffle) for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+    return a;
+  }
+  // 下書き → 保存する形（問題 q と正解 key）。エラーがあれば errors に入れる
+  function fromDraft(d) {
+    const errors = [];
+    const q = { id: d.id || uid(), type: d.type, title: d.title.trim(), timeLimit: Math.max(0, parseInt(d.timeLimit, 10) || 0) };
+    let key;
+    if (!q.title) errors.push('問題文を入力してください');
+    const has = e => (e.text || '').trim() || e.img;
+    if (d.type === 'choice') {
+      if (d.options.length < 2) errors.push('選択肢は2つ以上必要です');
+      if (d.options.some(o => !has(o))) errors.push('空の選択肢があります（文字か画像を入れてください）');
+      q.options = d.options.map(o => ({ text: (o.text || '').trim(), img: o.img || '' }));
+      key = Math.min(d.correct, d.options.length - 1);
+    } else {
+      const E = d.entries;
+      if (E.length < 2) errors.push('項目は2つ以上必要です');
+      if (E.some(e => !has(e))) errors.push('空の項目があります（文字か画像を入れてください）');
+      if (d.type === 'order') {
+        const p = shuffled(E.length, d.shuffle);           // p[j] = 表示位置jに来る項目の正解順位
+        q.items = p.map(r => ({ text: E[r].text.trim(), img: E[r].img || '' }));
+        q.slots = E.map(() => ({ text: '', img: '' }));
+        key = p.slice();
+      } else if (d.type === 'match') {
+        if (E.some(e => !e.photo)) errors.push('写真が入っていない項目があります');
+        const s = shuffled(E.length, true);                // s[k] = 写真番号kに来る項目
+        q.items = E.map(e => ({ text: e.text.trim(), img: e.img || '' }));
+        q.slots = s.map(i => ({ text: '', img: E[i].photo || '' }));
+        key = E.map((_, i) => s.indexOf(i));
+      } else if (d.type === 'group') {
+        const G = d.groups.map(g => (g || '').trim());
+        if (G.length < 2) errors.push('グループは2つ以上必要です');
+        if (G.some(g => !g)) errors.push('グループ名が空です');
+        const p = shuffled(E.length, d.shuffle);
+        q.items = p.map(i => ({ text: E[i].text.trim(), img: E[i].img || '' }));
+        q.slots = G.map(g => ({ text: g, img: '' }));
+        key = p.map(i => Math.min(Number(E[i].group) || 0, G.length - 1));
+      }
+    }
+    return { q, key, errors };
+  }
+  function imagesOf(q) {
+    const ids = [];
+    ['options', 'items', 'slots'].forEach(f => toArr(q[f]).forEach(o => { if (o && o.img) ids.push(o.img); }));
+    return ids;
+  }
+
+  // ---------- 一覧 ----------
+  function renderList() {
+    const qs = sortedQuestions(questions);
+    document.getElementById('qcount').textContent = qs.length + '問';
+    const el = document.getElementById('qlist');
+    if (!qs.length) { el.innerHTML = '<p class="sub">まだ問題がありません。「新しい問題」から作成してください。</p>'; return; }
+    el.innerHTML = qs.map((q, i) => `
+      <div class="qitem ${draft && draft.id === q.id ? 'active' : ''}">
+        <div><div class="t">Q${i + 1}. ${esc(q.title)}</div><span class="badge">${esc(TYPES[q.type].short)}</span>
+          ${q.timeLimit ? `<span class="sub">　${q.timeLimit}秒</span>` : ''}</div>
+        <div class="ops">
+          <button data-op="up" data-id="${q.id}" ${i === 0 ? 'disabled' : ''}>↑</button>
+          <button data-op="down" data-id="${q.id}" ${i === qs.length - 1 ? 'disabled' : ''}>↓</button>
+          <button data-op="edit" data-id="${q.id}">編集</button>
+          <button data-op="del" data-id="${q.id}" class="danger">削除</button>
+        </div>
+      </div>`).join('');
+  }
+  document.getElementById('qlist').addEventListener('click', async e => {
+    const b = e.target.closest('button[data-op]'); if (!b) return;
+    const qs = sortedQuestions(questions);
+    const i = qs.findIndex(q => q.id === b.dataset.id); const q = qs[i];
+    if (b.dataset.op === 'edit') { draft = toDraft(q, keys[q.id]); renderEditor(); renderList(); }
+    if (b.dataset.op === 'del') {
+      if (!confirm(`「${q.title}」を削除しますか？`)) return;
+      const upd = { ['questions/' + q.id]: null, ['keys/' + q.id]: null };
+      imagesOf(q).forEach(id => { upd['images/' + id] = null; });
+      await Store.update('', upd);
+      if (draft && draft.id === q.id) { draft = blankDraft('choice'); renderEditor(); }
+    }
+    if (b.dataset.op === 'up' || b.dataset.op === 'down') {
+      const j = b.dataset.op === 'up' ? i - 1 : i + 1;
+      const upd = {};
+      qs.forEach((x, n) => { upd['questions/' + x.id + '/order'] = n; });
+      upd['questions/' + qs[i].id + '/order'] = j;
+      upd['questions/' + qs[j].id + '/order'] = i;
+      await Store.update('', upd);
+    }
+  });
+
+  // ---------- 編集フォーム ----------
+  function imgBox(list, i, k, id, label) {
+    return `<div class="imgbox">${id ? `<img data-img="${esc(id)}"><button data-act="rmimg" data-list="${list}" data-i="${i}" data-k="${k}">×</button>`
+      : `<label class="up">📷 ${label}<input type="file" accept="image/*" data-list="${list}" data-i="${i}" data-k="${k}"></label>`}</div>`;
+  }
+  function renderEditor() {
+    const d = draft, el = document.getElementById('editor');
+    let body = '';
+    if (d.type === 'choice') {
+      body = `<div class="field"><label>選択肢（正解にチェック）</label>
+        ${d.options.map((o, i) => `<div class="erow">
+          <div class="lab">${i + 1}</div>
+          <input data-list="options" data-i="${i}" data-k="text" value="${esc(o.text)}" placeholder="選択肢の文字（画像だけでもOK）">
+          <div class="imgs">${imgBox('options', i, 'img', o.img, '画像')}</div>
+          <div class="ctrl"><label><input type="radio" name="correct" data-f="correct" value="${i}" ${d.correct === i ? 'checked' : ''} style="width:auto"> 正解</label>
+            <button data-act="del" data-list="options" data-i="${i}" ${d.options.length <= 2 ? 'disabled' : ''}>削除</button></div>
+        </div>`).join('')}
+        <button data-act="add" data-list="options" ${d.options.length >= 6 ? 'disabled' : ''}>＋ 選択肢を追加</button>
+        <p class="mini">例：「1位は誰？」は候補を並べて1つ正解に。「どっちがAさんの絵？」は画像2枚を入れて正解を選択。</p></div>`;
+    } else if (d.type === 'order') {
+      body = `<div class="field"><label>項目を<b>正解の順番（①が先頭）</b>で入力してください</label>
+        ${d.entries.map((e, i) => `<div class="erow">
+          <div class="lab">${CIRCLED[i]}</div>
+          <input data-list="entries" data-i="${i}" data-k="text" value="${esc(e.text)}" placeholder="項目名（例：田中さん）">
+          <div class="imgs">${imgBox('entries', i, 'img', e.img, '画像')}</div>
+          <div class="ctrl"><button data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button><button data-act="down" data-i="${i}" ${i === d.entries.length - 1 ? 'disabled' : ''}>↓</button>
+            <button data-act="del" data-list="entries" data-i="${i}" ${d.entries.length <= 2 ? 'disabled' : ''}>削除</button></div>
+        </div>`).join('')}
+        <button data-act="add" data-list="entries" ${d.entries.length >= 8 ? 'disabled' : ''}>＋ 項目を追加</button>
+        <p class="mini"><label><input type="checkbox" data-f="shuffle" ${d.shuffle ? 'checked' : ''} style="width:auto"> 保存時にA・B・C…の並びをシャッフルする</label></p></div>`;
+    } else if (d.type === 'match') {
+      body = `<div class="field"><label>項目と<b>正解の写真</b>をペアで入力（写真の①②…の番号は保存時に自動でシャッフル）</label>
+        ${d.entries.map((e, i) => `<div class="erow">
+          <div class="lab">${LETTERS[i]}</div>
+          <input data-list="entries" data-i="${i}" data-k="text" value="${esc(e.text)}" placeholder="項目名（例：田中さん）">
+          <div class="imgs">${imgBox('entries', i, 'photo', e.photo, '正解の写真')}</div>
+          <div class="ctrl"><button data-act="del" data-list="entries" data-i="${i}" ${d.entries.length <= 2 ? 'disabled' : ''}>削除</button></div>
+        </div>`).join('')}
+        <button data-act="add" data-list="entries" ${d.entries.length >= 8 ? 'disabled' : ''}>＋ ペアを追加</button>
+        <p class="mini">例：「子どもの頃の写真は誰？」→ A 田中さん＋田中さんの写真…</p></div>`;
+    } else if (d.type === 'group') {
+      body = `<div class="field"><label>グループ名</label>
+        ${d.groups.map((g, i) => `<div class="erow" style="grid-template-columns:34px 1fr auto">
+          <div class="lab">${i + 1}</div><input data-list="groups" data-i="${i}" value="${esc(g)}" placeholder="例：パクチー食べれる">
+          <div class="ctrl"><button data-act="del" data-list="groups" data-i="${i}" ${d.groups.length <= 2 ? 'disabled' : ''}>削除</button></div></div>`).join('')}
+        <button data-act="add" data-list="groups" ${d.groups.length >= 4 ? 'disabled' : ''}>＋ グループを追加</button></div>
+        <div class="field"><label>項目と正解のグループ</label>
+        ${d.entries.map((e, i) => `<div class="erow">
+          <div class="lab">${LETTERS[i]}</div>
+          <input data-list="entries" data-i="${i}" data-k="text" value="${esc(e.text)}" placeholder="項目名（例：田中さん）">
+          <div class="imgs">${imgBox('entries', i, 'img', e.img, '画像')}
+            <select data-list="entries" data-i="${i}" data-k="group">${d.groups.map((g, k) => `<option value="${k}" ${Number(e.group) === k ? 'selected' : ''}>${esc(g || ('グループ' + (k + 1)))}</option>`).join('')}</select></div>
+          <div class="ctrl"><button data-act="del" data-list="entries" data-i="${i}" ${d.entries.length <= 2 ? 'disabled' : ''}>削除</button></div>
+        </div>`).join('')}
+        <button data-act="add" data-list="entries" ${d.entries.length >= 8 ? 'disabled' : ''}>＋ 項目を追加</button>
+        <p class="mini"><label><input type="checkbox" data-f="shuffle" ${d.shuffle ? 'checked' : ''} style="width:auto"> 保存時にA・B・C…の並びをシャッフルする</label></p></div>`;
+    }
+
+    el.innerHTML = `<h2>${d.id ? '問題を編集' : '新しい問題'}</h2>
+      <div class="field"><label>問題の形式</label>
+        <select data-f="type">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${d.type === k ? 'selected' : ''}>${t.name}</option>`).join('')}</select></div>
+      <div class="field"><label>問題文</label><textarea data-f="title" rows="2" placeholder="例：パクチーを食べられるのは誰？">${esc(d.title)}</textarea></div>
+      <div class="field"><label>制限時間（秒・0で無制限）</label><input type="number" min="0" step="5" data-f="timeLimit" value="${d.timeLimit}" style="width:120px"></div>
+      ${body}
+      <p class="err" id="errs"></p>
+      <div class="a-actions"><button class="primary" data-act="save">保存</button>
+        ${d.id ? '<button data-act="cancel">新規作成に戻る</button>' : ''}</div>`;
+    Q.hydrateImages(el);
+  }
+
+  const ed = document.getElementById('editor');
+  ed.addEventListener('input', e => {
+    const t = e.target;
+    if (t.type === 'file' || t.type === 'radio' || t.type === 'checkbox' || t.tagName === 'SELECT') return;
+    setValue(t, t.value);
+  });
+  ed.addEventListener('change', async e => {
+    const t = e.target;
+    if (t.type === 'file') {
+      const f = t.files[0]; if (!f) return;
+      try {
+        const data = await Q.compressImage(f);
+        const id = 'img_' + uid();
+        await Store.set('images/' + id, data);
+        draft[t.dataset.list][+t.dataset.i][t.dataset.k] = id;
+        renderEditor();
+      } catch (err) { alert('画像を読み込めませんでした'); }
+      return;
+    }
+    if (t.type === 'radio') { draft.correct = +t.value; return; }
+    if (t.type === 'checkbox') { draft[t.dataset.f] = t.checked; return; }
+    if (t.tagName === 'SELECT') {
+      if (t.dataset.f === 'type') { draft.type = t.value; renderEditor(); return; }
+      setValue(t, +t.value);
+    }
+  });
+  function setValue(t, v) {
+    if (t.dataset.f) { draft[t.dataset.f] = v; return; }
+    const list = draft[t.dataset.list], i = +t.dataset.i;
+    if (!list) return;
+    if (t.dataset.k) list[i][t.dataset.k] = v; else list[i] = v;
+  }
+  ed.addEventListener('click', async e => {
+    const b = e.target.closest('button[data-act]'); if (!b) return;
+    const act = b.dataset.act, list = draft[b.dataset.list], i = +b.dataset.i;
+    if (act === 'add') {
+      if (b.dataset.list === 'options') list.push({ text: '', img: '' });
+      else if (b.dataset.list === 'groups') list.push('グループ' + (list.length + 1));
+      else list.push(blankEntry());
+    }
+    if (act === 'del') {
+      list.splice(i, 1);
+      if (b.dataset.list === 'options' && draft.correct >= list.length) draft.correct = 0;
+      if (b.dataset.list === 'groups') draft.entries.forEach(en => { if (en.group >= list.length) en.group = 0; });
+    }
+    if (act === 'rmimg') list[i][b.dataset.k] = '';
+    if (act === 'up' || act === 'down') {
+      const j = act === 'up' ? i - 1 : i + 1, E = draft.entries;
+      [E[i], E[j]] = [E[j], E[i]];
+    }
+    if (act === 'cancel') { draft = blankDraft('choice'); renderList(); }
+    if (act === 'save') {
+      const { q, key, errors } = fromDraft(draft);
+      if (errors.length) { document.getElementById('errs').innerHTML = errors.map(esc).join('<br>'); return; }
+      const old = questions[q.id];
+      q.order = old ? (old.order || 0) : Object.keys(questions).length
+        ? Math.max(...Object.values(questions).map(x => x.order || 0)) + 1 : 0;
+      await Store.update('', { ['questions/' + q.id]: q, ['keys/' + q.id]: key });
+      toast('保存しました');
+      draft = blankDraft(draft.type);
+      renderList();
+    }
+    renderEditor();
+  });
+
+  function toast(msg) {
+    const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
+    document.body.appendChild(t); setTimeout(() => t.remove(), 1600);
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>クイズに参加</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+</head>
+<body class="player">
+<header class="p-head"><span id="appTitle"></span><span class="me" id="meName"></span></header>
+<main id="view"></main>
+
+<script>
+(function () {
+  const { Store, LETTERS, CIRCLED, esc, fmt, toArr, slotLabel } = Q;
+  document.title = Q.C.APP_TITLE;
+  document.getElementById('appTitle').textContent = Q.C.APP_TITLE;
+  Q.demoBanner();
+
+  const PITCH = 66;            // 並び替えカードの間隔(px)
+  const LINE_COLORS = ['#ff5a5f', '#3d8bfd', '#f5b301', '#22b573', '#a259ff', '#ff8a3d', '#ff6fb5', '#2ad1d1'];
+
+  let pid = Q.lsGet('pid');
+  if (!pid) { pid = Q.uid(); Q.lsSet('pid', pid); }
+
+  let me = null, meLoaded = false;
+  let state = { phase: 'lobby' }, curQ = null, myAns = null, myRes, scores = {}, players = {};
+  // local.value[項目] = 割り当てた番号/グループ（未選択は null）
+  let local = { qid: null, value: null, order: null, sel: null };
+  let boundQid = null, unsubs = [];
+  let drag = null, pendingRender = false;
+
+  Store.listen('players/' + pid, v => { me = v; meLoaded = true; render(); });
+  Store.listen('state', v => { state = v || { phase: 'lobby' }; bindQuestion(); render(); });
+  Store.listen('scores', v => { scores = v || {}; if (['reveal', 'ranking', 'spotlight'].includes(state.phase)) render(); });
+  Store.listen('players', v => { players = v || {}; if (['ranking', 'spotlight'].includes(state.phase)) render(); });
+
+  function bindQuestion() {
+    if (state.qid === boundQid) return;
+    unsubs.forEach(f => f()); unsubs = [];
+    boundQid = state.qid; curQ = null; myAns = null; myRes = undefined;
+    if (!boundQid) return;
+    unsubs.push(Store.listen('questions/' + boundQid, v => { curQ = v; render(); }));
+    unsubs.push(Store.listen('answers/' + boundQid + '/' + pid, v => { myAns = v; render(); }));
+    unsubs.push(Store.listen('results/' + boundQid + '/' + pid, v => { myRes = v; render(); }));
+  }
+
+  const view = document.getElementById('view');
+
+  function render() {
+    if (drag) { pendingRender = true; return; }   // ドラッグ中は描き直さない
+    document.getElementById('meName').textContent = me ? me.name : '';
+    if (!meLoaded) { view.innerHTML = '<div class="center sub">接続中…</div>'; return; }
+    if (!me) return renderJoin();
+    const ph = state.phase;
+    if (ph === 'lobby' || !state.qid) {
+      view.innerHTML = `<div class="center"><div style="font-size:54px">🍻</div><div class="big">参加しました！</div>
+        <p class="sub">${esc(me.name)} さん、スクリーンを見ながら<br>問題が出るのを待ってください</p></div>`;
+      return;
+    }
+    if (ph === 'ranking' || ph === 'spotlight') return renderRanking();
+    if (!curQ) { view.innerHTML = '<div class="center sub">読み込み中…</div>'; return; }
+    if (ph === 'question') return renderQuestion();
+    if (ph === 'closed') {
+      view.innerHTML = `<div class="center"><div class="big">締切！</div><p class="sub">正解発表を待っています</p></div>` + myAnswerHtml();
+      return;
+    }
+    if (ph === 'reveal') return renderReveal();
+  }
+
+  // ---------- 参加登録 ----------
+  function renderJoin() {
+    if (document.getElementById('nameIn')) return;
+    view.innerHTML = `<div class="center"><div style="font-size:54px">🎉</div><div class="big">クイズに参加</div>
+      <p class="sub">名前を入れてください（スクリーンに表示されます）</p>
+      <input id="nameIn" maxlength="12" placeholder="例：たなか" value="${esc(Q.lsGet('name') || '')}" style="text-align:center;font-size:20px">
+      <button class="primary send" id="joinBtn">参加する</button><p class="err" id="joinErr"></p></div>`;
+    const go = () => {
+      const name = document.getElementById('nameIn').value.trim();
+      if (!name) { document.getElementById('joinErr').textContent = '名前を入れてください'; return; }
+      Q.lsSet('name', name);
+      Store.set('players/' + pid, { name, joinedAt: Store.now() });
+    };
+    document.getElementById('joinBtn').onclick = go;
+    document.getElementById('nameIn').onkeydown = e => { if (e.key === 'Enter') go(); };
+  }
+
+  // ---------- タイマー ----------
+  function remaining() {
+    if (!curQ || !curQ.timeLimit) return null;
+    return Math.ceil((state.startedAt + curQ.timeLimit * 1000 - Store.now()) / 1000);
+  }
+  setInterval(() => {
+    const el = document.getElementById('pTimer'); if (!el) return;
+    const r = remaining(); el.textContent = r == null ? '' : '⏱ ' + Math.max(0, r);
+  }, 250);
+
+  // ---------- 回答画面 ----------
+  function initLocal(q) {
+    if (local.qid === q.id) return;
+    const n = toArr(q.items).length;
+    local = { qid: q.id, value: null, order: null, sel: null };
+    if (q.type === 'choice') { local.value = myAns ? Number(myAns.v) : null; return; }
+    local.value = myAns ? toArr(myAns.v).map(x => (x == null ? null : Number(x))) : Array(n).fill(null);
+    if (q.type === 'order') {
+      local.order = myAns ? [...Array(n).keys()].sort((a, b) => local.value[a] - local.value[b]) : [...Array(n).keys()];
+      syncOrder();
+    }
+  }
+  function syncOrder() { local.value = local.order.map(() => 0); local.order.forEach((item, pos) => { local.value[item] = pos; }); }
+  const sameAsSent = () => myAns && JSON.stringify(toArr(myAns.v).map(Number)) === JSON.stringify(local.value);
+
+  function renderQuestion() {
+    const q = curQ;
+    initLocal(q);
+    let h = `<div class="p-q"><span class="p-timer" id="pTimer"></span>${esc(q.title)}</div>`;
+    if (q.type === 'choice') {
+      const opts = toArr(q.options);
+      if (opts.some(o => o.img)) h += '<p class="sub howto">スクリーンの画像を見て、番号を選んでください</p>';
+      h += `<div class="p-tiles">${opts.map((o, i) => `<button class="p-tile c${i} ${local.value === i ? 'sel' : (local.value != null ? 'unsel' : '')}" data-c="${i}">
+        <span class="n">${i + 1}</span>${esc(o.text || '')}</button>`).join('')}</div>
+        <div class="status ${myAns ? 'ok' : ''}">${myAns ? '✓ 送信済み（締切まで変更できます）' : 'タップで回答'}</div>`;
+      view.innerHTML = h; updateTimer(); return;
+    }
+    if (q.type === 'order') h += orderHtml(q);
+    if (q.type === 'match') h += matchHtml(q);
+    if (q.type === 'group') h += groupHtml(q);
+    const full = local.value.every(v => v != null), same = sameAsSent();
+    h += `<div class="summary">${summaryHtml(q)}</div>
+      <button class="primary send" id="sendBtn" ${full && !same ? '' : 'disabled'}>${same ? '✓ 送信済み' : myAns ? '変更して送信' : '送信'}</button>
+      <div class="status ${same ? 'ok' : ''}">${same ? '締切まで変更できます' : myAns ? '未送信の変更があります' : full ? '確認して送信してください' : hintText(q)}</div>`;
+    view.innerHTML = h;
+    if (q.type === 'match') drawLines();
+    updateTimer();
+  }
+  function updateTimer() { const r = remaining(), t = document.getElementById('pTimer'); if (t && r != null) t.textContent = '⏱ ' + Math.max(0, r); }
+  function hintText(q) {
+    if (q.type === 'match') return '左の点から右の点へ線を引いてください';
+    if (q.type === 'group') return 'すべて箱に入れてから送信';
+    return '';
+  }
+  const itemName = (q, i) => esc(toArr(q.items)[i].text || '（画像）');
+
+  function summaryHtml(q) {
+    const items = toArr(q.items);
+    if (q.type === 'order') return local.order.map((it, pos) => `${CIRCLED[pos]} ${itemName(q, it)}`).join('　');
+    if (q.type === 'match') return items.map((_, i) => `${LETTERS[i]}→${local.value[i] == null ? '？' : CIRCLED[local.value[i]]}`).join('　');
+    if (q.type === 'group') return toArr(q.slots).map((s, g) => `<b>${esc(s.text)}</b>：${items.map((_, i) => (local.value[i] === g ? LETTERS[i] : '')).filter(Boolean).join('・') || '－'}`).join('　');
+    return '';
+  }
+
+  // ===== 並び替え（ドラッグ） =====
+  function orderHtml(q) {
+    const n = local.order.length;
+    return `<p class="sub howto">≡ をつかんで上下に動かす（2つをタップで入れ替えも可）</p>
+      <div class="ord" id="ord" style="height:${n * PITCH}px">
+      ${local.order.map((_, pos) => `<div class="ordnum" style="top:${pos * PITCH}px">${CIRCLED[pos]}</div>`).join('')}
+      ${local.order.map((it, pos) => `<div class="ocard ${local.sel === pos ? 'picked' : ''}" data-pos="${pos}" style="top:${pos * PITCH}px">
+        <b>${LETTERS[it]}</b><span class="ot">${itemName(q, it)}</span><span class="grip">≡</span></div>`).join('')}
+      </div>`;
+  }
+
+  // ===== 写真マッチング（線つなぎ） =====
+  function matchHtml(q) {
+    const items = toArr(q.items), slots = toArr(q.slots);
+    const usedR = new Set(local.value.filter(v => v != null));
+    return `<p class="sub howto">左の点から右の点まで指でなぞる（タップ→タップでも可）／線をタップで消去</p>
+      <div class="mt" id="mt"><svg id="mtsvg"></svg>
+        <div class="mcol">${items.map((_, i) => `<div class="mcard L ${local.value[i] != null ? 'on' : ''} ${local.sel && local.sel.side === 'l' && local.sel.idx === i ? 'picked' : ''}" data-l="${i}">
+          <b>${LETTERS[i]}</b><span class="mtxt">${itemName(q, i)}</span><span class="dot" style="background:${LINE_COLORS[i % 8]}"></span></div>`).join('')}</div>
+        <div class="mcol">${slots.map((_, k) => `<div class="mcard R ${usedR.has(k) ? 'on' : ''} ${local.sel && local.sel.side === 'r' && local.sel.idx === k ? 'picked' : ''}" data-r="${k}">
+          <span class="dot"></span><b>${CIRCLED[k]}</b><span class="mtxt sub">の写真</span></div>`).join('')}</div>
+      </div>`;
+  }
+  function dotCenter(el) {
+    const box = document.getElementById('mt').getBoundingClientRect();
+    const d = el.querySelector('.dot').getBoundingClientRect();
+    return { x: d.left + d.width / 2 - box.left, y: d.top + d.height / 2 - box.top };
+  }
+  function drawLines(temp) {
+    const svg = document.getElementById('mtsvg'), mt = document.getElementById('mt');
+    if (!svg) return;
+    svg.setAttribute('width', mt.clientWidth); svg.setAttribute('height', mt.clientHeight);
+    let s = '';
+    local.value.forEach((k, i) => {
+      if (k == null) return;
+      const a = dotCenter(mt.querySelector(`[data-l="${i}"]`)), b = dotCenter(mt.querySelector(`[data-r="${k}"]`));
+      s += `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${LINE_COLORS[i % 8]}" stroke-width="5" stroke-linecap="round"/>
+        <line class="hit" data-del="${i}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="transparent" stroke-width="26"/>`;
+    });
+    if (temp) s += `<line x1="${temp.x1}" y1="${temp.y1}" x2="${temp.x2}" y2="${temp.y2}" stroke="#fff" stroke-width="4" stroke-dasharray="8 6" stroke-linecap="round"/>`;
+    svg.innerHTML = s;
+  }
+  window.addEventListener('resize', () => { if (document.getElementById('mt') && !drag) drawLines(); });
+  function connect(l, r) {
+    local.value = local.value.map(v => (v === r ? null : v));   // 1つの写真は1人だけ
+    local.value[l] = r;
+  }
+
+  // ===== グループ分け（箱へドラッグ） =====
+  function groupHtml(q) {
+    const items = toArr(q.items), slots = toArr(q.slots);
+    const chip = i => `<div class="gchip ${local.sel === i ? 'picked' : ''}" data-item="${i}"><b>${LETTERS[i]}</b>${itemName(q, i)}</div>`;
+    const pool = items.map((_, i) => i).filter(i => local.value[i] == null);
+    return `<p class="sub howto">カードを箱までドラッグ（カード→箱のタップでも可）</p>
+      <div class="gpool gdrop" data-g="-1"><div class="glabel">まだ入れていない人</div>
+        <div class="gchips">${pool.map(chip).join('') || '<span class="sub">全員入りました 👍</span>'}</div></div>
+      <div class="gboxes">${slots.map((s, g) => `<div class="gdrop" data-g="${g}"><div class="glabel">${esc(s.text)}</div>
+        <div class="gchips">${items.map((_, i) => i).filter(i => local.value[i] === g).map(chip).join('')}</div></div>`).join('')}</div>`;
+  }
+
+  // ===== 指の操作（ドラッグ／タップ） =====
+  view.addEventListener('pointerdown', e => {
+    if (state.phase !== 'question' || !curQ || drag) return;
+    const t = curQ.type;
+    if (t === 'order') {
+      const c = e.target.closest('.ocard'); if (!c) return;
+      e.preventDefault();
+      drag = { kind: 'order', el: c, from: +c.dataset.pos, to: +c.dataset.pos, y0: e.clientY, moved: false };
+      c.classList.add('dragging');
+    } else if (t === 'match') {
+      const c = e.target.closest('[data-l],[data-r]'); if (!c) return;
+      e.preventDefault();
+      const side = c.hasAttribute('data-l') ? 'l' : 'r';
+      drag = { kind: 'match', side, idx: +(side === 'l' ? c.dataset.l : c.dataset.r), start: dotCenter(c), x0: e.clientX, y0: e.clientY, moved: false };
+    } else if (t === 'group') {
+      const c = e.target.closest('.gchip'); if (!c) return;
+      e.preventDefault();
+      drag = { kind: 'group', el: c, item: +c.dataset.item, x0: e.clientX, y0: e.clientY, moved: false, ghost: null };
+    }
+  });
+
+  window.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x0 || 0, dy = e.clientY - drag.y0;
+    if (!drag.moved && Math.hypot(e.clientX - (drag.x0 ?? e.clientX), dy) < 8) return;
+    drag.moved = true;
+    if (drag.kind === 'order') {
+      const n = local.order.length;
+      drag.to = Math.max(0, Math.min(n - 1, Math.round(drag.from + dy / PITCH)));
+      document.querySelectorAll('.ocard').forEach(c => {
+        const p = +c.dataset.pos;
+        if (c === drag.el) { c.style.transform = `translateY(${dy}px)`; return; }
+        const shift = (drag.from < p && p <= drag.to) ? -PITCH : (drag.to <= p && p < drag.from) ? PITCH : 0;
+        c.style.transform = `translateY(${shift}px)`;
+      });
+    } else if (drag.kind === 'match') {
+      const box = document.getElementById('mt').getBoundingClientRect();
+      drawLines({ x1: drag.start.x, y1: drag.start.y, x2: e.clientX - box.left, y2: e.clientY - box.top });
+      document.querySelectorAll('.mcard.hover').forEach(x => x.classList.remove('hover'));
+      const tgt = targetUnder(e, drag.side === 'l' ? '[data-r]' : '[data-l]');
+      if (tgt) tgt.classList.add('hover');
+    } else if (drag.kind === 'group') {
+      if (!drag.ghost) {
+        drag.ghost = drag.el.cloneNode(true);
+        drag.ghost.classList.add('ghost');
+        document.body.appendChild(drag.ghost);
+        drag.el.classList.add('lifted');
+      }
+      drag.ghost.style.left = e.clientX + 'px'; drag.ghost.style.top = e.clientY + 'px';
+      document.querySelectorAll('.gdrop.hover').forEach(x => x.classList.remove('hover'));
+      const tgt = targetUnder(e, '[data-g]');
+      if (tgt) tgt.classList.add('hover');
+    }
+  }, { passive: false });
+
+  function targetUnder(e, sel) {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    return el ? el.closest(sel) : null;
+  }
+
+  function endDrag(e) {
+    if (!drag) return;
+    const d = drag; drag = null;
+    if (d.kind === 'order') {
+      if (d.moved) {
+        const [it] = local.order.splice(d.from, 1);
+        local.order.splice(d.to, 0, it);
+      } else {
+        // タップ：1つ目を選ぶ → 2つ目をタップで入れ替え
+        if (local.sel == null) local.sel = d.from;
+        else if (local.sel === d.from) local.sel = null;
+        else { const o = local.order; [o[local.sel], o[d.from]] = [o[d.from], o[local.sel]]; local.sel = null; }
+      }
+      syncOrder();
+    } else if (d.kind === 'match') {
+      if (d.moved) {
+        const tgt = e && targetUnder(e, d.side === 'l' ? '[data-r]' : '[data-l]');
+        if (tgt) d.side === 'l' ? connect(d.idx, +tgt.dataset.r) : connect(+tgt.dataset.l, d.idx);
+        local.sel = null;
+      } else {
+        const s = local.sel;
+        if (s && s.side !== d.side) { s.side === 'l' ? connect(s.idx, d.idx) : connect(d.idx, s.idx); local.sel = null; }
+        else if (s && s.side === d.side && s.idx === d.idx) local.sel = null;
+        else local.sel = { side: d.side, idx: d.idx };
+      }
+    } else if (d.kind === 'group') {
+      if (d.ghost) d.ghost.remove();
+      if (d.moved) {
+        const tgt = e && targetUnder(e, '[data-g]');
+        if (tgt) { const g = +tgt.dataset.g; local.value[d.item] = g < 0 ? null : g; }
+        local.sel = null;
+      } else local.sel = local.sel === d.item ? null : d.item;
+    }
+    pendingRender = false;
+    render();
+  }
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', () => endDrag(null));
+
+  // ---------- クリック（選択肢・送信・線の削除・箱のタップ） ----------
+  view.addEventListener('click', e => {
+    if (state.phase !== 'question' || !curQ) return;
+    const c = e.target.closest('[data-c]');
+    if (c) {
+      local.value = +c.dataset.c;
+      Store.set('answers/' + curQ.id + '/' + pid, { v: local.value, at: Store.now() });
+      renderQuestion(); return;
+    }
+    const del = e.target.closest('[data-del]');
+    if (del) { local.value[+del.dataset.del] = null; renderQuestion(); return; }
+    const box = e.target.closest('[data-g]');
+    if (box && !e.target.closest('.gchip') && local.sel != null && curQ.type === 'group') {
+      const g = +box.dataset.g; local.value[local.sel] = g < 0 ? null : g; local.sel = null;
+      renderQuestion(); return;
+    }
+    if (e.target.id === 'sendBtn') {
+      Store.set('answers/' + curQ.id + '/' + pid, { v: local.value.slice(), at: Store.now() });
+    }
+  });
+
+  // ---------- 締切後・正解発表・順位 ----------
+  function myAnswerHtml() {
+    if (!myAns) return '<div class="keylist sub" style="text-align:center">未回答</div>';
+    const q = curQ, v = myAns.v;
+    if (q.type === 'choice') { const o = toArr(q.options)[v] || {}; return `<div class="keylist">あなたの回答：<b>${Number(v) + 1}</b> ${esc(o.text || '')}</div>`; }
+    return `<div class="keylist"><div class="sub">あなたの回答</div>${toArr(q.items).map((it, i) => `<div><b>${LETTERS[i]}</b> ${esc(it.text || '')} → ${esc(slotLabel(q, Number(toArr(v)[i])))}</div>`).join('')}</div>`;
+  }
+
+  function renderReveal() {
+    const q = curQ, key = state.revealKey, total = scores[pid] || 0;
+    let cls = 'ng', big = '残念…', sub = '';
+    if (!myAns) { big = '未回答'; }
+    else if (myRes == null) { big = '集計中…'; cls = ''; }
+    else if (myRes >= 0.999) { cls = 'ok'; big = '正解！'; sub = '+1点'; }
+    else if (myRes > 0) { cls = 'part'; big = '部分正解'; sub = `+${fmt(myRes)}点`; }
+    let keyHtml = '';
+    if (key != null) {
+      if (q.type === 'choice') {
+        const o = toArr(q.options)[key] || {};
+        keyHtml = `<div class="keylist">正解：<b>${Number(key) + 1}</b> ${esc(o.text || '')}</div>`;
+      } else {
+        const mine = myAns ? toArr(myAns.v) : [];
+        keyHtml = `<div class="keylist"><div class="sub">正解</div>${toArr(q.items).map((it, i) => {
+          const ok = myAns && Number(mine[i]) === Number(toArr(key)[i]);
+          return `<div>${myAns ? (ok ? '✅' : '❌') : ''} <b>${LETTERS[i]}</b> ${esc(it.text || '')} → <b>${esc(slotLabel(q, Number(toArr(key)[i])))}</b></div>`;
+        }).join('')}</div>`;
+      }
+    }
+    view.innerHTML = `<div class="result ${cls}"><div class="big">${big}</div><div style="font-size:22px;font-weight:800">${sub}</div></div>
+      ${keyHtml}<p class="center sub" style="padding:14px">現在の合計：<b style="color:var(--text)">${fmt(total)}点</b></p>`;
+  }
+
+  function renderRanking() {
+    const rows = Q.buildRanking(players, scores);
+    const mine = rows.find(r => r.pid === pid);
+    const spot = state.phase === 'spotlight' && state.spotPid === pid
+      ? '<div class="spot-banner">📣 いまスクリーンに あなたの結果が映っています！</div>' : '';
+    view.innerHTML = spot + `<div class="center"><p class="sub">あなたの順位</p>
+      <div class="myrank">${mine ? mine.rank + '位' : '-'}</div>
+      <p class="sub">${rows.length}人中　／　${fmt(mine ? mine.score : 0)}点</p></div>`;
+  }
+})();
+</script>
+</body>
+</html>
