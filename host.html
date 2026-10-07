@@ -22,24 +22,37 @@
   <div id="chips" class="chips"></div>
 </div>
 <div id="controls">
-  <span class="phase" id="phaseLabel"></span>
-  <button class="primary" id="btnNext"></button>
-  <button id="btnClose">締切</button>
-  <button id="btnReveal">正解発表</button>
-  <button id="btnRank">順位を表示</button>
-  <button id="btnLobby">参加QR</button>
-  <button id="btnHint" class="hintbtn hidden">ヒント</button>
-  <select id="selP"></select><button id="btnSpot">この人の結果</button>
-  <select id="selQ"></select><button id="btnGo">この問題を出す</button>
-  <span class="sep"></span>
-  <button id="btnBgm" class="tgl" aria-pressed="true">BGM</button>
-  <button id="btnSfx" class="tgl" aria-pressed="true">効果音</button>
-  <span class="sep"></span>
-  <span class="evname" id="evName"></span>
-  <button id="btnSwitch">開催を切り替え</button>
-  <button id="btnReset" class="danger">リセット</button>
-  <a href="admin.html" target="_blank">問題作成 ↗</a>
-  <span class="hint">Space/→：次へ　T：ヒント　H：操作バーを隠す　M：BGM</span>
+  <div class="cgroup flow">
+    <span class="phase" id="phaseLabel"></span>
+    <button class="primary next" id="btnNext"></button>
+  </div>
+  <div class="cgroup">
+    <button id="btnClose">締切</button>
+    <button id="btnReveal">正解発表</button>
+    <button id="btnHint" class="hintbtn hidden">ヒント</button>
+    <button id="btnRank">順位</button>
+    <button id="btnLobby">参加QR</button>
+  </div>
+  <div class="cgroup">
+    <select id="selQ" aria-label="出す問題"></select><button id="btnGo">出す</button>
+  </div>
+  <div class="cgroup">
+    <select id="selP" aria-label="結果を見せる参加者"></select><button id="btnSpot">結果を表示</button>
+  </div>
+  <div class="cgroup end">
+    <button id="btnBgm" class="tgl" aria-pressed="true">BGM</button>
+    <button id="btnSfx" class="tgl" aria-pressed="true">効果音</button>
+    <details class="more">
+      <summary>メニュー</summary>
+      <div class="menu">
+        <div class="menu-ev" id="evName"></div>
+        <button id="btnSwitch">開催を切り替え</button>
+        <a href="admin.html" target="_blank" class="mlink">問題作成を開く ↗</a>
+        <button id="btnReset" class="danger">参加者と得点をリセット</button>
+        <p class="keys">Space / → 次へ　T ヒント<br>H 操作バーを隠す　M BGM</p>
+      </div>
+    </details>
+  </div>
 </div>
 
 <script>
@@ -238,10 +251,10 @@
     $('phaseLabel').textContent = labels[S.state.phase] || '';
     $('btnNext').textContent = nextLabel();
     const sel = $('selQ'), cur = curIdx();
-    const html = list.map((q, i) => `<option value="${i}" ${i === cur ? 'selected' : ''}>Q${i + 1}. ${esc(q.title).slice(0, 24)}</option>`).join('');
+    const html = list.map((q, i) => `<option value="${i}" ${i === cur ? 'selected' : ''}>Q${i + 1}. ${esc(q.title).slice(0, 18)}</option>`).join('');
     if (sel.dataset.h !== html) { sel.innerHTML = html; sel.dataset.h = html; }
     const sp = $('selP'), cp = sp.value || S.state.spotPid;
-    const ph2 = '<option value="">参加者を選ぶ</option>' + Q.buildRanking(S.players, S.scores)
+    const ph2 = '<option value="">参加者を選ぶ…</option>' + Q.buildRanking(S.players, S.scores)
       .map(r => `<option value="${r.pid}" ${r.pid === cp ? 'selected' : ''}>${esc(r.name)}（${r.rank}位）</option>`).join('');
     if (sp.dataset.h !== ph2) { sp.innerHTML = ph2; sp.dataset.h = ph2; }
   }
@@ -290,12 +303,17 @@
   function renderMain(ph, q, list) {
     const m = $('main');
     if (ph === 'lobby') {
+      const t = META.title || '', len = [...t].length;
+      const size = len <= 10 ? 7.4 : len <= 16 ? 6.4 : len <= 24 ? 5.4 : len <= 34 ? 4.6 : 3.8;
       m.innerHTML = `<div class="lobby">
-        <div><div class="brand-sm"><img src="favicon.svg" alt="">${esc(Q.C.APP_TITLE)}</div>
-          <h1>${esc(META.title || '')}</h1><p>スマホでQRを読み取って参加！</p>
-          <div class="qrwrap"><div id="qr"></div></div><p class="url">${esc(joinUrl())}</p></div>
-        <div><h2>参加者 <span id="pcount">0</span>人 <small id="rcount" class="sub"></small></h2><div id="lobbyChips" class="chips"></div></div></div>`;
-      if (window.QRCode) new QRCode($('qr'), { text: joinUrl(), width: Math.round(innerHeight * 0.36), height: Math.round(innerHeight * 0.36) });
+        <header class="lobby-head"><div class="brand-sm"><img src="favicon.svg" alt="">${esc(Q.C.APP_TITLE)}</div>
+          <h1 style="font-size:${size}vh">${esc(t)}</h1></header>
+        <div class="lobby-qr"><div class="qrwrap"><div id="qr"></div></div>
+          <div class="qr-cap"><b>スマホのカメラでQRを読み取って参加</b><span class="url">${esc(joinUrl().replace(/^https?:\/\//, ''))}</span></div></div>
+        <footer class="lobby-people"><div class="pc-line">参加者 <span id="pcount">0</span>人 <small id="rcount"></small></div>
+          <div id="lobbyChips" class="chips"></div></footer></div>`;
+      const qs2 = Math.round(Math.min(innerHeight * 0.36, innerWidth * 0.28));
+      if (window.QRCode) new QRCode($('qr'), { text: joinUrl(), width: qs2, height: qs2 });
       else $('qr').textContent = 'QRライブラリを読み込めませんでした';
       lastScene = 'lobby';
       return;
@@ -312,10 +330,10 @@
     const scene = ph + '|' + q.id;
     m.classList.remove('enter');
     if (ph === 'question' || ph === 'closed') {
-      m.innerHTML = head + hintsHtml() + questionHtml(q) + (ph === 'closed' ? '<div class="overlay"><span>締切！</span></div>' : '');
+      m.innerHTML = head + hintsHtml() + withImg(q, questionHtml(q)) + (ph === 'closed' ? '<div class="overlay"><span>締切！</span></div>' : '');
       if (ph === 'question' && scene !== lastScene) { void m.offsetWidth; m.classList.add('enter'); }
     } else if (ph === 'reveal') {
-      m.innerHTML = head + revealHtml(q);
+      m.innerHTML = head + withImg(q, revealHtml(q));
       if (scene !== lastScene && q.type !== 'choice') { void m.offsetWidth; m.classList.add('enter'); }
       requestAnimationFrame(() => m.querySelectorAll('[data-w]').forEach(b => { b.style.width = b.dataset.w; }));
       Q.countUp(m);
@@ -324,6 +342,8 @@
     Q.hydrateImages(m);
   }
 
+  // 問題の画像（顔写真など）を左に大きく
+  const withImg = (q, h) => q.img ? `<div class="qimg-wrap"><div class="qimg"><img data-img="${esc(q.img)}" alt=""></div><div class="qimg-body">${h}</div></div>` : h;
   // 出題者が表示したヒント
   let hintSeen = 0;
   function hintsHtml() {

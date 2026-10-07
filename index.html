@@ -56,6 +56,7 @@
     me = null; meLoaded = false; state = { phase: 'lobby' }; scores = {}; players = {}; roster = {}; prevPhase = null;
     if (!eid) { E = null; return; }
     E = Q.scope('events/' + eid); E.eid = eid;
+    Q.setImageBase('events/' + eid + '/images/');
     evUnsubs.push(E.listen('players/' + pid, v => { me = v; meLoaded = true; render(); }));
     evUnsubs.push(E.listen('roster', v => { roster = v || {}; if (!me) render(); }));
     evUnsubs.push(E.listen('state', onState));
@@ -182,13 +183,13 @@
     const hs = toArr(state.hints);
     if (hs.length) h += `<div class="p-hints">${hs.map((t, i) => `<div><b>ヒント${i + 1}</b>${esc(t)}</div>`).join('')}</div>`;
     if (pts(q) !== 1) h += `<p class="p-pts">この問題は配点 ×${fmt(pts(q))}</p>`;
+    if (q.img) h += `<img class="p-qimg" data-img="${esc(q.img)}" alt="">`;
     if (q.type === 'choice') {
       const opts = toArr(q.options);
-      if (opts.some(o => o.img)) h += '<p class="sub howto">スクリーンの画像を見て、番号を選んでください</p>';
       h += `<div class="p-tiles">${opts.map((o, i) => `<button class="p-tile c${i} ${local.value === i ? 'sel' : (local.value != null ? 'unsel' : '')}" data-c="${i}">
-        <span class="n">${i + 1}</span>${esc(o.text || '')}</button>`).join('')}</div>
+        <span class="n">${i + 1}</span>${o.img ? `<img class="p-oimg" data-img="${esc(o.img)}" alt="">` : ''}${esc(o.text || '')}</button>`).join('')}</div>
         <div class="status ${myAns ? 'ok' : ''}">${myAns ? '✓ 送信済み（締切まで変更できます）' : 'タップで回答'}</div>`;
-      view.dataset.h = ''; view.innerHTML = h; updateTimer(); return;
+      view.dataset.h = ''; view.innerHTML = h; Q.hydrateImages(view); updateTimer(); return;
     }
     if (q.type === 'order') h += orderHtml(q);
     if (isMatch(q)) h += matchHtml(q);
@@ -197,7 +198,7 @@
     h += `<div class="summary">${summaryHtml(q)}</div>
       <button class="primary send" id="sendBtn" ${full && !same ? '' : 'disabled'}>${same ? '✓ 送信済み' : myAns ? '変更して送信' : '送信'}</button>
       <div class="status ${same ? 'ok' : ''}">${same ? '締切まで変更できます' : myAns ? '未送信の変更があります' : full ? '確認して送信してください' : hintText(q)}</div>`;
-    view.dataset.h = ''; view.innerHTML = h;
+    view.dataset.h = ''; view.innerHTML = h; Q.hydrateImages(view);
     if (isMatch(q)) drawLines();
     updateTimer();
   }

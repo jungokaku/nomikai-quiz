@@ -152,7 +152,7 @@
       fr.readAsDataURL(file);
     });
   }
-  const imgCache = {};
+  const imgCache = {}, imgDone = {};
   let imgBase = 'images/';
   function setImageBase(b) { imgBase = b; }
   function getImage(id) {
@@ -166,7 +166,8 @@
     (root || document).querySelectorAll('img[data-img]').forEach(el => {
       const id = el.getAttribute('data-img');
       if (!id) { el.remove(); return; }
-      getImage(id).then(src => { if (src) el.src = src; });
+      if (imgDone[imgBase + id]) { el.src = imgDone[imgBase + id]; return; }
+      getImage(id).then(src => { if (src) { imgDone[imgBase + id] = src; el.src = src; } });
     });
   }
 
@@ -389,10 +390,49 @@
   }
   const vibrate = ms => { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) {} };
 
+  // ===== アンケート（問題作成用） =====
+  // 都道府県：全国地方公共団体コード順（おおむね北→南）
+  const PREFS = ['北海道','青森県','岩手県','宮城県','秋田県','山形県','福島県','茨城県','栃木県','群馬県','埼玉県','千葉県','東京都','神奈川県',
+    '新潟県','富山県','石川県','福井県','山梨県','長野県','岐阜県','静岡県','愛知県','三重県','滋賀県','京都府','大阪府','兵庫県','奈良県','和歌山県',
+    '鳥取県','島根県','岡山県','広島県','山口県','徳島県','香川県','愛媛県','高知県','福岡県','佐賀県','長崎県','熊本県','大分県','宮崎県','鹿児島県','沖縄県'];
+  const SURVEY_KINDS = {
+    text:   { name: '自由記述（短い文章）', short: '自由記述' },
+    choice: { name: '選択式（選択肢から1つ）', short: '選択式' },
+    number: { name: '数値（年齢・年など）', short: '数値' },
+    pref:   { name: '都道府県（出身地など）', short: '都道府県' },
+    photo:  { name: '写真', short: '写真' }
+  };
+  const SURVEY_TEMPLATES = [
+    { kind: 'pref',   label: '出身地（都道府県）は？' },
+    { kind: 'text',   label: '好きな食べ物は？' },
+    { kind: 'photo',  label: '子どもの頃の写真をください' },
+    { kind: 'choice', label: 'パクチーは食べられる？', options: ['食べられる', '食べられない'] },
+    { kind: 'number', label: '生まれた年は？（西暦）', unit: '年' },
+    { kind: 'text',   label: '休日の過ごし方は？' },
+    { kind: 'text',   label: '特技・趣味は？' },
+    { kind: 'choice', label: '朝型？夜型？', options: ['朝型', '夜型'] },
+    { kind: 'choice', label: '犬派？猫派？', options: ['犬派', '猫派'] },
+    { kind: 'number', label: '兄弟姉妹は何人？（自分を含む）', unit: '人' }
+  ];
+  // アンケートの質問一覧（顔写真を使う設定なら先頭に顔写真の欄を入れる）
+  const FACE = '_face';
+  function surveyQuestions(sv) {
+    const list = Object.values((sv && sv.qs) || {}).sort((a, b) => (a.order || 0) - (b.order || 0));
+    if (sv && sv.face !== false) list.unshift({ id: FACE, kind: 'photo', face: true, req: !!sv.faceReq, label: '顔写真をアップロードしてください' });
+    return list;
+  }
+  function surveyText(sq, v) {
+    if (v == null || v === '') return '';
+    if (sq.kind === 'number') return v + (sq.unit || '');
+    if (sq.kind === 'photo') return '写真';
+    return String(v);
+  }
+
   window.Q = {
     C, Store, CIRCLED, LETTERS, TYPES, uid, esc, fmt, toArr, sortedQuestions, slotLabel,
     scoreAnswer, buildRanking, compressImage, getImage, setImageBase, hydrateImages, lsGet, lsSet, demoBanner,
     scope, hashPass, eventGate, leaveEvent, rosterNames, rosterFromNames,
+    PREFS, SURVEY_KINDS, SURVEY_TEMPLATES, surveyText, surveyQuestions, FACE,
     toast, confetti, countUp, vibrate, reduceMotion
   };
 })();

@@ -12,6 +12,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script src="config.js"></script>
 <script src="common.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
 <body class="admin">
 <div class="p-head"><span id="appTitle"></span><span class="head-links"><button id="btnSwitch" class="ghost">開催を切り替え</button><a href="host.html" target="_blank">進行・投影画面を開く ↗</a></span></div>
@@ -24,7 +25,14 @@
     <div class="a-actions"><button class="primary" id="btnNew">＋ 新しい問題</button></div>
   </div>
   </div>
-  <div class="a-panel" id="editor"></div>
+  <div class="a-main">
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="editor" aria-selected="true">問題を編集</button>
+      <button role="tab" data-tab="survey" aria-selected="false">アンケート <span id="svCount" class="tabcount"></span></button>
+    </div>
+    <div class="a-panel" id="editor"></div>
+    <div class="a-panel hidden" id="surveyPanel"></div>
+  </div>
 </div>
 
 <script>
@@ -35,6 +43,8 @@
 
   let questions = {}, keys = {}, roster = {}, players = {}, meta = {}, catalog = {}, hasBgm = false;
   let draft = null, E = null, EID = '', lastCounts = '';
+  let survey = {}, svAns = {}, gen = null, tab = 'editor';
+  let bk = {}, bkState = { running: false, done: 0, total: 0, msg: '', err: '' }, bkTimer = null;
 
   Q.demoBanner();
   Q.eventGate(start, 'admin');
@@ -47,6 +57,9 @@
     E.listen('roster', v => { roster = v || {}; renderEvent(); syncCounts(); });
     E.listen('players', v => { players = v || {}; });
     E.listen('bgmName', v => { hasBgm = v || ''; renderEvent(); });
+    E.listen('survey', v => { survey = v || {}; renderSurvey(); });
+    E.listen('surveyAns', v => { svAns = v || {}; renderSurvey(); autoBackup(); });
+    E.listen('surveyBackup', v => { bk = v || {}; renderSurvey(); autoBackup(); });
     Store.listen('catalog', v => { catalog = v || {}; meta = catalog[eid] || {}; renderEvent(); document.title = (meta.title || '') + '｜問題作成'; });
     document.getElementById('btnNew').onclick = () => { draft = blankDraft('choice'); renderEditor(); };
     document.getElementById('btnSwitch').onclick = () => Q.leaveEvent();
@@ -140,7 +153,7 @@
   function blankEntry() { return { text: '', img: '', photo: '', word: '', group: 0, note: '' }; }
   function blankDraft(type) {
     return {
-      id: null, type, title: '', timeLimit: 30, shuffle: true, points: 1,
+      id: null, type, title: '', timeLimit: 30, shuffle: true, points: 1, img: '',
       hints: [], explain: '', topLabel: '', bottomLabel: '',
       options: [{ text: '', img: '', note: '' }, { text: '', img: '', note: '' }], correct: 0,
       entries: [blankEntry(), blankEntry(), blankEntry(), blankEntry()],
@@ -150,7 +163,7 @@
   function toDraft(q, key) {
     const d = blankDraft(q.type);
     d.id = q.id; d.title = q.title || ''; d.timeLimit = q.timeLimit || 0;
-    d.points = Number(q.points) || 1; d.hints = toArr(q.hints).slice(); d.explain = q.explain || '';
+    d.points = Number(q.points) || 1; d.hints = toArr(q.hints).slice(); d.explain = q.explain || ''; d.img = q.img || '';
     d.topLabel = q.topLabel || ''; d.bottomLabel = q.bottomLabel || '';
     const items = toArr(q.items), slots = toArr(q.slots), k = toArr(key);
     if (q.type === 'choice') {
@@ -183,6 +196,7 @@
     const hints = d.hints.map(h => (h || '').trim()).filter(Boolean).slice(0, 5);
     if (hints.length) q.hints = hints;
     if ((d.explain || '').trim()) q.explain = d.explain.trim();
+    if (d.img) q.img = d.img;
     const nt = o => ((o && o.note) || '').trim();
     let key;
     if (!q.title) errors.push('問題文を入力してください');
@@ -229,7 +243,8 @@
   }
   function imagesOf(q) {
     const ids = [];
-    ['options', 'items', 'slots'].forEach(f => toArr(q[f]).forEach(o => { if (o && o.img) ids.push(o.img); }));
+    ['options', 'items', 'slots'].forEach(f => toArr(q[f]).forEach(o => { if (o && o.img && !String(o.img).startsWith('sv_')) ids.push(o.img); }));
+    if (q.img && !String(q.img).startsWith('sv_')) ids.push(q.img);
     return ids;
   }
 
@@ -360,6 +375,9 @@
       <div class="field"><label>問題の形式</label>
         <select data-f="type">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${d.type === k ? 'selected' : ''}>${t.name}</option>`).join('')}</select></div>
       <div class="field"><label>問題文</label><textarea data-f="title" rows="2" placeholder="例：パクチーを食べられるのは誰？">${esc(d.title)}</textarea></div>
+      <div class="field"><label>問題の画像（任意・スクリーンとスマホに表示）</label>
+        <div class="imgbox qimgbox">${d.img ? `<img data-img="${esc(d.img)}"><button data-act="rmqimg">画像を外す</button>`
+          : `<label class="up">📷 画像を選ぶ<input type="file" accept="image/*" data-qimg="1"></label><span class="mini">例：顔写真を見せて「この人は誰？」</span>`}</div></div>
       <div class="field"><label>制限時間（秒・0で無制限）</label><input type="number" min="0" step="5" data-f="timeLimit" value="${d.timeLimit}" style="width:120px"></div>
       ${body}
       ${extrasHtml(d)}
@@ -368,6 +386,404 @@
         ${d.id ? '<button data-act="cancel">新規作成に戻る</button>' : ''}</div>`;
     Q.hydrateImages(el);
   }
+
+  // =====================================================================
+  //  アンケート（問題作成用）
+  // =====================================================================
+  function setTab(t) {
+    tab = t;
+    document.querySelectorAll('.tabs [data-tab]').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === t ? 'true' : 'false'));
+    document.getElementById('editor').classList.toggle('hidden', t !== 'editor');
+    document.getElementById('surveyPanel').classList.toggle('hidden', t !== 'survey');
+    if (t === 'survey') { document.getElementById('surveyPanel').dataset.h = ''; renderSurvey(); }
+  }
+  document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) setTab(b.dataset.tab); });
+
+  const svQs = () => Object.values(survey.qs || {}).sort((a, b) => (a.order || 0) - (b.order || 0));
+  const surveyUrl = () => new URL('survey.html?e=' + EID, location.href).href;
+  const baseOf = label => String(label || '').replace(/[（(][^）)]*[）)]/g, '').replace(/(を教えて|をください).*$/, '').replace(/[はをがの]?[？?！!]+$/, '').trim();
+  // 質問の種類ごとに作れる問題
+  const GEN_TYPES = {
+    face:   [['whoface', 'この人は誰？（顔写真を見せて名前を選ぶ）'], ['faceopt', '○○さんはどの人？（顔写真から選ぶ）'], ['match', '写真マッチング（名前 ↔ 顔写真）']],
+    pref:   [['order', '並び替え（北の人から順に）'], ['what', '○○さんの出身地は？（選択）'], ['pair', '言葉マッチング（人 ↔ 出身地）']],
+    number: [['order', '並び替え（数の順に）'], ['what', '○○さんの答えは？（選択）']],
+    text:   [['what', '○○さんの答えは？（選択）'], ['pair', '言葉マッチング（人 ↔ 回答）'], ['who', 'この回答は誰？（選択）']],
+    choice: [['group', 'グループ分け'], ['what', '○○さんの答えは？（選択）']],
+    photo:  [['match', '写真マッチング（人 ↔ 写真）']]
+  };
+  const kindOf = sq => sq.face ? 'face' : sq.kind;
+  const needsTarget = t => ['who', 'what', 'whoface', 'faceopt'].includes(t);
+  const sqById = id => Q.surveyQuestions(survey).find(q => q.id === id);
+  const faceOf = key => (svAns[key] && svAns[key].a && svAns[key].a[Q.FACE]) || '';
+  const answered = sq => Object.entries(svAns).filter(([, r]) => r.a && r.a[sq.id] != null && r.a[sq.id] !== '')
+    .map(([k, r]) => ({ key: k, name: r.name, v: r.a[sq.id] }));
+
+  function renderSurvey() {
+    const n = Object.keys(svAns).length;
+    document.getElementById('svCount').textContent = n ? n + '件' : '';
+    const el = document.getElementById('surveyPanel');
+    if (tab !== 'survey' || !EID) return;
+    const ae = document.activeElement;
+    if (el.contains(ae) && (ae.tagName === 'TEXTAREA' || (ae.tagName === 'INPUT' && !ae.readOnly && ['text', 'number', ''].includes(ae.type)))) return;
+    const Qs = svQs(), people = Object.entries(svAns).sort((a, b) => (a[1].at || 0) - (b[1].at || 0));
+    const svPeople = Object.entries(survey.people || {}).sort((a, b) => (a[1].order || 0) - (b[1].order || 0));
+    const faceOn = survey.face !== false, allQs = Q.surveyQuestions(survey), faceQ = allQs.find(q => q.face);
+    const sig = JSON.stringify([survey, svAns, gen, meta.title, bk, bkState, bkConf()]);
+    if (el.dataset.h === sig) return;
+    el.dataset.h = sig;
+    const kindSel = k => Object.entries(Q.SURVEY_KINDS).map(([v, o]) => `<option value="${v}" ${k === v ? 'selected' : ''}>${o.short}</option>`).join('');
+    const used = new Set(Qs.map(q => q.label));
+    el.innerHTML = `
+      <section class="sv-sec">
+        <div class="sv-top">
+          <div><h2>アンケートで問題のネタを集める</h2>
+            <p class="mini">クイズの題材になる人に事前に答えてもらい、その回答から問題を自動で作れます。</p></div>
+          <label class="switch"><input type="checkbox" id="svOpen" ${survey.open ? 'checked' : ''}><span></span>${survey.open ? '受付中' : '受付停止中'}</label>
+        </div>
+        <div class="sv-share ${survey.open ? '' : 'off'}">
+          <div id="svQr" class="sv-qr"></div>
+          <div class="sv-url"><div class="sub">回答用URL（社内チャットなどで共有）</div>
+            <input readonly value="${esc(surveyUrl())}" id="svUrl">
+            <div class="row"><button id="svCopy">URLをコピー</button><a href="${esc(surveyUrl())}" target="_blank">回答画面を開く ↗</a></div>
+            ${survey.open ? '' : '<p class="mini">受付を開始すると、このURLから回答できるようになります。</p>'}</div>
+        </div>
+      </section>
+
+      <section class="sv-sec">
+        <h3>回答者 <span class="sub">${svPeople.length}人</span></h3>
+        <p class="mini" style="margin-top:-4px">アンケートに答える人（クイズの題材になる人）のリストです。<b>当日クイズに参加する人の名簿とは別</b>に管理します。
+          登録すると、回答画面で名前をタップするだけで答えられます。空のままなら、回答者が名前を入力します。</p>
+        <div class="rchips">${svPeople.map(([pid, r]) => `<span class="rchip ${svAns[pid] ? 'answered' : ''}">${esc(r.name)}${svAns[pid] ? ' ✓' : ''}<button data-svpdel="${pid}" aria-label="${esc(r.name)}を削除">×</button></span>`).join('') || '<span class="sub">まだ登録していません</span>'}</div>
+        <div class="row"><input id="svPeopleAdd" placeholder="名前を追加（読点「、」・カンマ・改行区切りでまとめて入力）"><button id="svPeopleBtn">追加</button>
+          ${svPeople.length ? '<button id="svPeopleClear" class="danger">空にする</button>' : ''}</div>
+        ${svPeople.length ? `<p class="mini">回答済み ${svPeople.filter(([pid]) => svAns[pid]).length} / ${svPeople.length}人${svPeople.some(([pid]) => !svAns[pid]) ? '（未回答：' + svPeople.filter(([pid]) => !svAns[pid]).map(([, r]) => esc(r.name)).join('、') + '）' : ''}</p>` : ''}
+      </section>
+
+      <section class="sv-sec">
+        <h3>顔写真</h3>
+        <div class="chkrow"><label class="chk"><input type="checkbox" id="svFace" ${faceOn ? 'checked' : ''}> アンケートの最初に顔写真をお願いする</label>
+          ${faceOn ? `<label class="chk"><input type="checkbox" id="svFaceReq" ${survey.faceReq ? 'checked' : ''}> 必須にする</label>` : ''}</div>
+        <p class="mini">顔写真があると「この人は誰？」のような人を知ってもらう問題が作れます。ほかの質問から作る問題にも顔写真を添えられます。</p>
+        ${faceOn ? `<div class="sv-qrow face">
+          <div class="sv-make"><span class="sub">顔写真 ${answered(faceQ).length}人</span>
+            <button class="primary" data-svop="gen" data-id="${Q.FACE}" ${answered(faceQ).length < 2 ? 'disabled title="2人以上の回答が必要です"' : ''}>顔写真から問題を作る</button></div>
+          ${gen && gen.qid === Q.FACE ? genHtml(faceQ) : ''}</div>` : ''}
+      </section>
+
+      <section class="sv-sec">
+        <h3>質問 <span class="sub">${Qs.length}問</span></h3>
+        <div class="sv-qs">${Qs.map((q, i) => `
+          <div class="sv-qrow">
+            <div class="sv-qhead">
+              <span class="badge">${esc(Q.SURVEY_KINDS[q.kind].short)}</span>
+              <input data-sv="${q.id}" data-k="label" value="${esc(q.label)}" maxlength="40">
+              <div class="ctrl"><button data-svop="up" data-id="${q.id}" ${i === 0 ? 'disabled' : ''}>↑</button><button data-svop="down" data-id="${q.id}" ${i === Qs.length - 1 ? 'disabled' : ''}>↓</button>
+                <button data-svop="del" data-id="${q.id}" class="danger">削除</button></div>
+            </div>
+            ${q.kind === 'choice' ? `<div class="row sv-sub"><span class="sub">選択肢</span><input data-sv="${q.id}" data-k="options" value="${esc(toArr(q.options).join('、'))}" placeholder="読点「、」区切り（例：犬派、猫派）"></div>` : ''}
+            ${q.kind === 'number' ? `<div class="row sv-sub"><span class="sub">単位</span><input data-sv="${q.id}" data-k="unit" value="${esc(q.unit || '')}" placeholder="例：年、cm、人" style="max-width:120px"></div>` : ''}
+            <div class="sv-make"><span class="sub">回答 ${answered(q).length}人　<label class="chk sm"><input type="checkbox" data-sv="${q.id}" data-k="req" ${q.req ? 'checked' : ''}> 必須</label></span>
+              <button class="primary" data-svop="gen" data-id="${q.id}" ${answered(q).length < 2 ? 'disabled title="2人以上の回答が必要です"' : ''}>この回答から問題を作る</button></div>
+            ${gen && gen.qid === q.id ? genHtml(q) : ''}
+          </div>`).join('') || '<p class="sub">まだ質問がありません。下のひな形から追加してください。</p>'}</div>
+        <div class="sv-add">
+          <div class="sub" style="margin-bottom:6px">ひな形から追加</div>
+          <div class="chips">${Q.SURVEY_TEMPLATES.map((t, i) => used.has(t.label) ? '' : `<button class="tpl" data-tpl="${i}">＋ ${esc(t.label)}</button>`).join('')}</div>
+          <div class="row" style="margin-top:10px"><select id="svKind" style="width:auto">${kindSel('text')}</select>
+            <input id="svLabel" maxlength="40" placeholder="自分で質問を作る（例：好きな映画は？）"><button id="svAdd">追加</button></div>
+        </div>
+      </section>
+
+      <section class="sv-sec">
+        <h3>回答一覧 <span class="sub">${people.length}人</span></h3>
+        ${people.length ? `<div class="sv-tablewrap"><table class="sv-table"><thead><tr><th>名前</th>${allQs.map(q => `<th>${esc(q.face ? '顔写真' : q.label)}</th>`).join('')}<th></th></tr></thead>
+          <tbody>${people.map(([k, r]) => `<tr><th>${esc(r.name)}</th>${allQs.map(q => `<td>${q.kind === 'photo'
+            ? (r.a && r.a[q.id] ? `<img data-img="${esc(r.a[q.id])}" alt="">` : '')
+            : esc(Q.surveyText(q, r.a && r.a[q.id]))}</td>`).join('')}<td><button class="mini-x" data-svdel="${esc(k)}" aria-label="${esc(r.name)}の回答を削除">×</button></td></tr>`).join('')}</tbody></table></div>`
+          : '<p class="sub">まだ回答がありません。</p>'}
+      </section>
+      ${backupHtml()}`;
+    Q.hydrateImages(el);
+    const qrEl = document.getElementById('svQr');
+    if (window.QRCode && qrEl) new QRCode(qrEl, { text: surveyUrl(), width: 120, height: 120 });
+  }
+
+  // =====================================================================
+  //  アンケート画像の Googleドライブ・バックアップ（GASウェブアプリへ送る）
+  //  URLと合言葉はこのPCのブラウザにだけ保存（データベースには入れない）
+  // =====================================================================
+  const bkGet = k => { try { return localStorage.getItem('quiz_backup_' + k) || ''; } catch (e) { return ''; } };
+  const bkSet = (k, v) => { try { localStorage.setItem('quiz_backup_' + k, v); } catch (e) {} };
+  const bkConf = () => ({ url: bkGet('url'), token: bkGet('token'), auto: bkGet('auto') === '1' });
+  // バックアップ対象：アンケートの回答に含まれる画像（顔写真・写真の質問）
+  function bkImages() {
+    const out = [];
+    Object.values(svAns).forEach(r => Object.entries(r.a || {}).forEach(([qid, v]) => {
+      if (!String(v).startsWith('sv_')) return;
+      const label = qid === Q.FACE ? '顔写真' : ((survey.qs && survey.qs[qid] && survey.qs[qid].label) || '写真');
+      out.push({ id: v, person: r.name, question: label, fileName: `${r.name}_${baseOf(label) || label}_${v}.jpg` });
+    }));
+    return out;
+  }
+  function backupHtml() {
+    const c = bkConf(), all = bkImages(), done = all.filter(x => bk[x.id]).length, pending = all.length - done;
+    const ready = c.url && c.token;
+    return `<section class="sv-sec bk">
+      <h3>ドライブにバックアップ <span class="sub">アンケートの画像のみ</span></h3>
+      <p class="mini" style="margin-top:-4px">画像はこれまでどおりアプリ内に保存したまま、控えをGoogleドライブのフォルダにも保存します（共有設定はしません）。
+        ドライブ側には開催名のフォルダが作られ、「名前_質問_画像ID.jpg」の名前で保存されます。</p>
+      <div class="bk-grid">
+        <label>GASウェブアプリのURL<input id="bkUrl" value="${esc(c.url)}" placeholder="https://script.google.com/macros/s/…/exec"></label>
+        <label>合言葉<input id="bkToken" type="password" value="${esc(c.token)}" placeholder="スクリプトプロパティ TOKEN と同じ" autocomplete="off"></label>
+      </div>
+      <p class="mini">URLと合言葉はこのPCのブラウザにだけ保存します。ほかのPCで使うときはもう一度入力してください。</p>
+      <div class="row"><button id="bkPing" ${ready ? '' : 'disabled'}>接続テスト</button>
+        <label class="chk"><input type="checkbox" id="bkAuto" ${c.auto ? 'checked' : ''} ${ready ? '' : 'disabled'}> この画面を開いている間は自動でバックアップ</label></div>
+      <div class="bk-status">
+        <div><b>${done}</b> / ${all.length}枚 バックアップ済み${pending ? `　<span class="bk-pend">未バックアップ ${pending}枚</span>` : all.length ? '　<span class="bk-ok">すべて保存済み</span>' : ''}</div>
+        ${bkState.running ? `<div class="bk-bar"><span style="width:${bkState.total ? Math.round(bkState.done / bkState.total * 100) : 0}%"></span></div><div class="mini">保存中… ${bkState.done} / ${bkState.total}枚</div>` : ''}
+        ${bkState.msg ? `<div class="mini bk-msg">${esc(bkState.msg)}</div>` : ''}
+        ${bkState.err ? `<p class="err">${esc(bkState.err)}</p>` : ''}
+        <button class="primary" id="bkRun" ${ready && pending && !bkState.running ? '' : 'disabled'}>未バックアップの画像をドライブに保存</button>
+      </div>
+    </section>`;
+  }
+  async function gasPost(payload) {
+    const c = bkConf();
+    // Content-Type を付けない（text/plain）ことで、GAS へ事前確認なしで送れる
+    const res = await fetch(c.url, { method: 'POST', body: JSON.stringify(Object.assign({ token: c.token }, payload)) });
+    const j = await res.json().catch(() => null);
+    if (!j) throw new Error('GASから正しい返事がありません（URLとデプロイ設定を確認してください）');
+    if (!j.ok) throw new Error(j.error || '保存に失敗しました');
+    return j;
+  }
+  async function runBackup(silent) {
+    if (bkState.running) return;
+    const c = bkConf();
+    if (!c.url || !c.token) return;
+    const list = bkImages().filter(x => !bk[x.id]);
+    if (!list.length) { if (!silent) toast('未バックアップの画像はありません', 'info'); return; }
+    bkState = { running: true, done: 0, total: list.length, msg: '', err: '' }; renderSurvey();
+    try {
+      for (const x of list) {
+        const data = await E.get('images/' + x.id);
+        if (data) {
+          const r = await gasPost({ action: 'save', event: meta.title || EID, fileName: x.fileName, data, person: x.person, question: x.question, imageId: x.id });
+          await E.set('surveyBackup/' + x.id, { fileId: r.id || '', at: Store.now() });
+        }
+        bkState.done++; renderSurvey();
+      }
+      bkState = { running: false, done: 0, total: 0, msg: `${list.length}枚をドライブに保存しました（${new Date().toLocaleTimeString('ja-JP')}）`, err: '' };
+      if (!silent) toast(`${list.length}枚をドライブに保存しました`);
+    } catch (e) {
+      bkState = { running: false, done: 0, total: 0, msg: '', err: 'バックアップできませんでした：' + e.message };
+      if (!silent) toast('バックアップできませんでした', 'warn');
+    }
+    renderSurvey();
+  }
+  function autoBackup() {
+    const c = bkConf();
+    if (!c.auto || !c.url || !c.token || bkState.running || bkState.err) return;
+    clearTimeout(bkTimer);
+    bkTimer = setTimeout(() => runBackup(true), 2000);
+  }
+
+  // 問題を作る（設定欄）
+  function genHtml(sq) {
+    const list = answered(sq), types = GEN_TYPES[kindOf(sq)];
+    const max = needsTarget(gen.type) ? 6 : 8;
+    const chosen = list.filter(p => gen.pick.includes(p.key));
+    const canFace = !sq.face && survey.face !== false && list.some(p => faceOf(p.key));
+    return `<div class="gen">
+      <div class="row"><span class="sub">問題の形式</span><select data-gen="type" style="width:auto">${types.map(([v, n]) => `<option value="${v}" ${gen.type === v ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        ${gen.type === 'order' && sq.kind === 'number' ? `<select data-gen="dir" style="width:auto"><option value="desc" ${gen.dir === 'desc' ? 'selected' : ''}>大きい順</option><option value="asc" ${gen.dir === 'asc' ? 'selected' : ''}>小さい順</option></select>` : ''}</div>
+      <div class="sub" style="margin:10px 0 6px">使う人を選ぶ（2〜${max}人）　<button class="linkbtn" data-genop="rand">ランダムに${Math.min(4, list.length)}人</button>　<button class="linkbtn" data-genop="none">選択を外す</button></div>
+      <div class="gen-people">${list.map(p => `<label class="gp ${gen.pick.includes(p.key) ? 'on' : ''}"><input type="checkbox" data-gpk="${esc(p.key)}" ${gen.pick.includes(p.key) ? 'checked' : ''}>
+        <b>${esc(p.name)}</b><span>${sq.kind === 'photo' ? `<img data-img="${esc(p.v)}" alt="">` : esc(Q.surveyText(sq, p.v))}</span></label>`).join('')}</div>
+      ${gen.type === 'what' ? '<p class="mini">選んだ人の回答が選択肢になります（同じ回答は1つにまとめます）。</p>' : ''}
+      ${needsTarget(gen.type) && chosen.length ? `<div class="row" style="margin-top:8px"><span class="sub">${gen.type === 'who' ? '正解（出題する回答）' : '主役にする人（正解）'}</span>
+        <select data-gen="target" style="width:auto">${chosen.map(p => `<option value="${esc(p.key)}" ${gen.target === p.key ? 'selected' : ''}>${esc(p.name)}${sq.kind === 'photo' ? '' : '：' + esc(Q.surveyText(sq, p.v))}</option>`).join('')}</select></div>` : ''}
+      ${canFace && gen.type !== 'whoface' ? `<label class="chk" style="margin-top:8px"><input type="checkbox" data-genface ${gen.face ? 'checked' : ''}> 顔写真を添える${gen.type === 'what' ? '（主役の顔写真を問題に表示）' : '（名前と一緒に表示）'}</label>` : ''}
+      <p class="err" id="genErr"></p>
+      <div class="row"><button class="primary" data-genop="make">下書きを作る</button><button data-genop="cancel">閉じる</button></div>
+    </div>`;
+  }
+
+  // 回答 → 問題の下書き
+  function buildDraft(sq) {
+    const list = answered(sq).filter(p => gen.pick.includes(p.key));
+    const max = needsTarget(gen.type) ? 6 : 8;
+    if (list.length < 2) return '2人以上選んでください';
+    if (list.length > max) return `${max}人までにしてください`;
+    const base = baseOf(sq.label), txt = v => Q.surveyText(sq, v);
+    const d = blankDraft(['who', 'what', 'whoface', 'faceopt'].includes(gen.type) ? 'choice' : gen.type);
+    d.shuffle = true;
+    const fimg = p => (gen.face && !sq.face ? faceOf(p.key) : '');
+    const entry = (p, extra) => Object.assign(blankEntry(), { text: p.name, note: txt(p.v), img: fimg(p) }, extra || {});
+    const target = list.find(p => p.key === gen.target) || list[0];
+    if (gen.type === 'order') {
+      let rank;
+      if (sq.kind === 'pref') {
+        rank = p => { const i = Q.PREFS.indexOf(p.v); return i < 0 ? 99 : i; };
+        d.title = `${base || '出身地'}が北の人から順番に並べて！`; d.topLabel = '北'; d.bottomLabel = '南';
+      } else {
+        const desc = gen.dir !== 'asc';
+        rank = p => desc ? -Number(p.v) : Number(p.v);
+        d.title = `${base}が${desc ? '大きい' : '小さい'}順に並べて！`;
+        d.topLabel = desc ? '大きい' : '小さい'; d.bottomLabel = desc ? '小さい' : '大きい';
+      }
+      const sorted = list.slice().sort((a, b) => rank(a) - rank(b));
+      const tie = sorted.some((p, i) => i && rank(p) === rank(sorted[i - 1]));
+      d.entries = sorted.map(p => entry(p));
+      if (tie) d._warn = '同じ回答の人がいます。並び順が1通りに決まらないので、人を入れ替えるか確認してください';
+    } else if (gen.type === 'pair') {
+      d.title = sq.kind === 'pref' ? `それぞれの${base || '出身地'}はどこ？` : `それぞれの${base}は？`;
+      d.entries = list.map(p => entry(p, { word: txt(p.v), note: '' }));
+      const words = d.entries.map(e => e.word);
+      if (new Set(words).size < words.length) d._warn = '同じ回答の人がいます。正解が1通りに決まらないので、人を入れ替えるか確認してください';
+    } else if (gen.type === 'who') {
+      d.title = `「${txt(target.v)}」と答えたのは誰？`;
+      d.options = list.map(p => ({ text: p.name, img: fimg(p), note: txt(p.v) }));
+      d.correct = list.indexOf(target);
+      if (list.some(p => p !== target && txt(p.v) === txt(target.v))) d._warn = 'ほかにも同じ回答の人がいます';
+    } else if (gen.type === 'group') {
+      const opts = toArr(sq.options).filter(o => list.some(p => p.v === o));
+      if (opts.length < 2) return '選んだ人の回答が1種類だけなので、グループ分けにできません';
+      d.title = `${sq.label.replace(/[？?]$/, '')}？ それぞれどっち？`;
+      d.groups = opts;
+      d.entries = list.map(p => entry(p, { group: Math.max(0, opts.indexOf(p.v)) }));
+      d.shuffle = true;
+    } else if (gen.type === 'match') {
+      d.title = sq.face ? 'それぞれの顔写真は誰？' : `${base}は誰のもの？`;
+      d.entries = list.map(p => entry(p, { photo: p.v, note: '', img: sq.face ? '' : fimg(p) }));
+    } else if (gen.type === 'whoface') {
+      d.title = 'この人は誰？';
+      d.img = target.v;
+      d.options = list.map(p => ({ text: p.name, img: '', note: '' }));
+      d.correct = list.indexOf(target);
+    } else if (gen.type === 'faceopt') {
+      d.title = `${target.name}さんはどの人？`;
+      d.options = list.map(p => ({ text: '', img: p.v, note: p.name }));
+      d.correct = list.indexOf(target);
+    } else if (gen.type === 'what') {
+      let opts;
+      if (sq.kind === 'choice') opts = toArr(sq.options).slice(0, 6);
+      else opts = [...new Set(list.map(p => txt(p.v)))];
+      if (!opts.includes(txt(target.v))) opts.unshift(txt(target.v));
+      opts = opts.slice(0, 6);
+      if (opts.length < 2) return '選んだ人の回答が1種類だけなので、選択問題にできません';
+      d.title = `${target.name}さんの${base}は？`;
+      d.img = gen.face ? faceOf(target.key) : '';
+      d.options = opts.map(o => ({ text: o, img: '', note: list.filter(p => txt(p.v) === o).map(p => p.name).join('、') }));
+      d.correct = opts.indexOf(txt(target.v));
+      d.explain = '';
+      return d;
+    }
+    d.explain = '';
+    return d;
+  }
+
+  const svPanel = document.getElementById('surveyPanel');
+  svPanel.addEventListener('click', async e => {
+    const t = e.target;
+    if (t.id === 'bkRun') { bkState.err = ''; return runBackup(false); }
+    if (t.id === 'bkPing') {
+      try { const r = await gasPost({ action: 'ping' }); bkState.err = ''; bkState.msg = `接続できました（保存先フォルダ：${r.folder}）`; toast('ドライブに接続できました'); }
+      catch (er) { bkState.msg = ''; bkState.err = '接続できませんでした：' + er.message; toast('接続できませんでした', 'warn'); }
+      renderSurvey(); return;
+    }
+    if (t.id === 'svCopy') { try { await navigator.clipboard.writeText(surveyUrl()); toast('URLをコピーしました'); } catch (er) { document.getElementById('svUrl').select(); toast('URLを選択しました。コピーしてください', 'info'); } return; }
+    if (t.id === 'svPeopleBtn') {
+      const inp = document.getElementById('svPeopleAdd');
+      const have = new Set(Object.values(survey.people || {}).map(r => r.name));
+      const add = [...new Set(inp.value.split(/[、,，\n]+/).map(x => x.trim()).filter(n => n && !have.has(n)))];
+      if (!add.length) return toast('追加する名前がありません（同じ名前は追加しません）', 'info');
+      const start = Object.keys(survey.people || {}).length, upd = {};
+      add.forEach((n, i) => { upd['people/p' + uid()] = { name: n, order: start + i }; });
+      inp.value = ''; await E.update('survey', upd); return toast(`${add.length}人を回答者に追加しました`);
+    }
+    if (t.id === 'svPeopleClear') { if (confirm('回答者リストを空にしますか？（回答は残ります）')) { await E.set('survey/people', null); toast('回答者リストを空にしました', 'info'); } return; }
+    const pd = t.closest('[data-svpdel]');
+    if (pd) { await E.set('survey/people/' + pd.dataset.svpdel, null); return; }
+    if (t.id === 'svAdd') {
+      const label = document.getElementById('svLabel').value.trim(), kind = document.getElementById('svKind').value;
+      if (!label) return toast('質問を入れてください', 'warn');
+      return addSq({ kind, label, options: kind === 'choice' ? ['はい', 'いいえ'] : undefined });
+    }
+    const tp = t.closest('[data-tpl]'); if (tp) return addSq(Q.SURVEY_TEMPLATES[+tp.dataset.tpl]);
+    const dl = t.closest('[data-svdel]');
+    if (dl) { if (confirm(`${svAns[dl.dataset.svdel].name} さんの回答を削除しますか？`)) { await E.set('surveyAns/' + dl.dataset.svdel, null); toast('回答を削除しました', 'info'); } return; }
+    const op = t.closest('[data-svop]');
+    if (op) {
+      const Qs = svQs(), i = Qs.findIndex(q => q.id === op.dataset.id), q = Qs[i] || sqById(op.dataset.id);
+      if (op.dataset.svop === 'del') { if (confirm(`質問「${q.label}」を削除しますか？（回答は残ります）`)) await E.set('survey/qs/' + q.id, null); }
+      if (op.dataset.svop === 'up' || op.dataset.svop === 'down') {
+        const j = op.dataset.svop === 'up' ? i - 1 : i + 1, upd = {};
+        Qs.forEach((x, n) => { upd['qs/' + x.id + '/order'] = n; });
+        upd['qs/' + Qs[i].id + '/order'] = j; upd['qs/' + Qs[j].id + '/order'] = i;
+        await E.update('survey', upd);
+      }
+      if (op.dataset.svop === 'gen') {
+        const list = answered(q);
+        gen = { qid: q.id, type: GEN_TYPES[kindOf(q)][0][0], dir: 'desc', pick: shuffle(list.map(p => p.key)).slice(0, 4), target: '',
+          face: !q.face && survey.face !== false && list.some(p => faceOf(p.key)) };
+        renderSurvey();
+      }
+      return;
+    }
+    const g = t.closest('[data-genop]');
+    if (g) {
+      const sq = sqById(gen.qid), list = answered(sq);
+      if (g.dataset.genop === 'rand') gen.pick = shuffle(list.map(p => p.key)).slice(0, 4);
+      if (g.dataset.genop === 'none') gen.pick = [];
+      if (g.dataset.genop === 'cancel') gen = null;
+      if (g.dataset.genop === 'make') {
+        const d = buildDraft(sq);
+        if (typeof d === 'string') { document.getElementById('genErr').textContent = d; return; }
+        const warn = d._warn; delete d._warn;
+        draft = d; gen = null;
+        setTab('editor'); renderEditor(); renderList();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        toast(warn || '下書きを作りました。内容を確認して「保存」してください', warn ? 'warn' : 'ok');
+        return;
+      }
+      renderSurvey();
+    }
+  });
+  svPanel.addEventListener('change', async e => {
+    const t = e.target;
+    if (t.id === 'svOpen') { await E.update('survey', { open: t.checked }); toast(t.checked ? 'アンケートの受付を開始しました' : 'アンケートの受付を停止しました', 'info'); return; }
+    if (t.id === 'bkUrl') { bkSet('url', t.value.trim()); bkState.err = ''; renderSurvey(); return; }
+    if (t.id === 'bkToken') { bkSet('token', t.value); bkState.err = ''; renderSurvey(); return; }
+    if (t.id === 'bkAuto') { bkSet('auto', t.checked ? '1' : ''); bkState.err = ''; renderSurvey(); autoBackup(); return; }
+    if (t.id === 'svFace') { await E.update('survey', { face: t.checked }); return; }
+    if (t.id === 'svFaceReq') { await E.update('survey', { faceReq: t.checked }); return; }
+    if (t.hasAttribute('data-genface')) { gen.face = t.checked; renderSurvey(); return; }
+    if (t.dataset.sv && t.dataset.k === 'req') { await E.set(`survey/qs/${t.dataset.sv}/req`, t.checked || null); return; }
+    if (t.dataset.sv) {
+      const k = t.dataset.k;
+      let v = t.value.trim();
+      if (k === 'options') v = v.split(/[、,，\n]+/).map(x => x.trim()).filter(Boolean);
+      if (k === 'label' && !v) return;
+      await E.set(`survey/qs/${t.dataset.sv}/${k}`, v); return;
+    }
+    if (t.dataset.gpk !== undefined) {
+      const k = t.dataset.gpk;
+      gen.pick = t.checked ? [...new Set(gen.pick.concat(k))] : gen.pick.filter(x => x !== k);
+      renderSurvey(); return;
+    }
+    if (t.dataset.gen) { gen[t.dataset.gen] = t.value; renderSurvey(); }
+  });
+  svPanel.addEventListener('focusout', () => setTimeout(() => { if (!svPanel.contains(document.activeElement)) renderSurvey(); }, 0));
+  async function addSq(t) {
+    const id = 's' + uid(), order = svQs().length;
+    const q = { id, kind: t.kind, label: t.label, order };
+    if (t.options) q.options = t.options.slice();
+    if (t.unit) q.unit = t.unit;
+    await E.set('survey/qs/' + id, q);
+    toast('質問を追加しました');
+  }
+  function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
   // 配点・ヒント・説明（すべて任意）
   function extrasHtml(d) {
@@ -406,7 +822,8 @@
         const data = await Q.compressImage(f);
         const id = 'img_' + uid();
         await E.set('images/' + id, data);
-        draft[t.dataset.list][+t.dataset.i][t.dataset.k] = id;
+        if (t.dataset.qimg) draft.img = id;
+        else draft[t.dataset.list][+t.dataset.i][t.dataset.k] = id;
         renderEditor();
         toast('画像を追加しました', 'info');
       } catch (err) { toast('画像を読み込めませんでした。JPEGかPNGを選んでください', 'warn'); }
@@ -441,6 +858,7 @@
       if (b.dataset.list === 'groups') draft.entries.forEach(en => { if (en.group >= list.length) en.group = 0; });
     }
     if (act === 'rmimg') list[i][b.dataset.k] = '';
+    if (act === 'rmqimg') draft.img = '';
     if (act === 'up' || act === 'down') {
       const j = act === 'up' ? i - 1 : i + 1, E = draft.entries;
       [E[i], E[j]] = [E[j], E[i]];

@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>アンケート</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#1e1b3a">
+<link rel="stylesheet" href="style.css">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+</head>
+<body class="player survey">
+<header class="p-head"><span id="appTitle"></span><span class="me" id="meName"></span></header>
+<main id="view"><div class="center sub">読み込み中…</div></main>
+
+<script>
+(function () {
+  const { Store, esc, toArr, uid, SURVEY_KINDS, PREFS } = Q;
+  const $ = id => document.getElementById(id);
+  const view = $('view');
+  Q.demoBanner();
+  $('appTitle').textContent = Q.C.APP_TITLE;
+
+  const EID = new URLSearchParams(location.search).get('e') || '';
+  if (!EID) { view.innerHTML = msg('📭', 'アンケートが見つかりません', '配られたURLをもう一度開いてください。'); return; }
+  const E = Q.scope('events/' + EID);
+  Q.setImageBase('events/' + EID + '/images/');
+
+  // roster = アンケートの回答者リスト（クイズの参加者名簿とは別）
+  let meta = null, survey = null, roster = {}, answers = {}, loaded = { meta: 0, survey: 0, ans: 0 };
+  let who = Q.lsGet('sv_' + EID);     // 回答者のキー（名簿ID か 端末ごとのID）
+  let mode = 'auto', form = {};
+
+  Store.listen('catalog/' + EID, v => { meta = v; loaded.meta = 1; render(); });
+  E.listen('survey', v => { survey = v || {}; roster = survey.people || {}; loaded.survey = 1; render(); });
+  E.listen('surveyAns', v => { answers = v || {}; loaded.ans = 1; render(); });
+
+  function msg(icon, title, sub) {
+    return `<div class="center"><div style="font-size:54px">${icon}</div><div class="big">${title}</div><p class="sub">${sub}</p></div>`;
+  }
+  const qs = () => Q.surveyQuestions(survey);
+
+  function render() {
+    if (!loaded.meta || !loaded.survey || !loaded.ans) return;
+    if (!meta) { view.innerHTML = msg('📭', 'アンケートが見つかりません', '配られたURLをもう一度開いてください。'); return; }
+    document.title = 'アンケート｜' + meta.title;
+    $('appTitle').textContent = meta.title;
+    const mine = who && answers[who];
+    $('meName').textContent = mine ? mine.name : '';
+    if (!survey.open) { view.innerHTML = msg('🔒', '受付していません', 'アンケートの受付は終了しているか、まだ始まっていません。'); return; }
+    if (!qs().length) { view.innerHTML = msg('📝', '準備中です', '質問がまだ用意されていません。少し待ってから開き直してください。'); return; }
+    if (mode === 'form') return;                       // 入力中は描き直さない
+    if (mode === 'pick' || !mine) return renderPick();
+    renderDone(mine);
+  }
+
+  // ---------- 名前を選ぶ ----------
+  function renderPick() {
+    if (view.dataset.v === 'pick') return;
+    const list = Object.entries(roster).sort((a, b) => (a[1].order || 0) - (b[1].order || 0));
+    view.dataset.v = 'pick';
+    view.innerHTML = `<div class="center join">
+      <div class="sv-badge">クイズの問題づくりにご協力ください</div>
+      <div class="big">アンケート</div>
+      <p class="sub">${list.length ? '自分の名前をタップしてください' : '名前を入れてください'}</p>
+      ${list.length ? `<div class="roster">${list.map(([rid, r]) => `<button class="rname ${answers[rid] ? 'done' : ''}" data-rid="${rid}">${esc(r.name)}${answers[rid] ? '<small>回答済み</small>' : ''}</button>`).join('')}</div>
+        <details class="other"><summary>リストに名前がない場合</summary>` : ''}
+      <input id="nameIn" maxlength="12" placeholder="例：たなか" value="${esc(Q.lsGet('name') || '')}" style="text-align:center;font-size:20px">
+      <button class="primary send" id="goBtn">この名前で回答する</button><p class="err" id="err"></p>
+      ${list.length ? '</details>' : ''}</div>`;
+    view.querySelectorAll('[data-rid]').forEach(b => b.onclick = () => {
+      const rid = b.dataset.rid;
+      if (answers[rid] && answers[rid].dev !== devId() && !confirm(`${roster[rid].name} さんの回答はすでにあります。上書きしますか？`)) return;
+      start(rid, roster[rid].name, rid);
+    });
+    $('goBtn').onclick = () => {
+      const n = $('nameIn').value.trim();
+      if (!n) { $('err').textContent = '名前を入れてください'; return; }
+      const hit = Object.entries(roster).find(([, r]) => r.name === n);
+      if (hit) return start(hit[0], n, hit[0]);
+      start('d' + devId(), n, null);
+    };
+  }
+  function devId() { let d = Q.lsGet('pid'); if (!d) { d = uid(); Q.lsSet('pid', d); } return d; }
+  function start(key, name, rid) {
+    who = key; Q.lsSet('sv_' + EID, key); Q.lsSet('name', name);
+    const prev = answers[key];
+    form = { name, rid, a: Object.assign({}, prev && prev.a) };
+    renderForm();
+  }
+
+  // ---------- 回答フォーム ----------
+  function field(sq) {
+    const v = form.a[sq.id], id = 'f_' + sq.id;
+    if (sq.kind === 'text') return `<input id="${id}" data-q="${sq.id}" maxlength="40" value="${esc(v || '')}" placeholder="短めに（15文字くらいまで）">`;
+    if (sq.kind === 'number') return `<div class="row"><input id="${id}" data-q="${sq.id}" type="number" inputmode="decimal" value="${v == null ? '' : esc(v)}" style="max-width:180px">${sq.unit ? `<span class="sub">${esc(sq.unit)}</span>` : ''}</div>`;
+    if (sq.kind === 'pref') return `<select id="${id}" data-q="${sq.id}"><option value="">選んでください</option>${PREFS.map(p => `<option ${v === p ? 'selected' : ''}>${p}</option>`).join('')}<option ${v === '海外' ? 'selected' : ''}>海外</option></select>`;
+    if (sq.kind === 'choice') return `<div class="pills">${toArr(sq.options).map((o, i) => `<label class="pill"><input type="radio" name="${id}" data-q="${sq.id}" value="${esc(o)}" ${v === o ? 'checked' : ''}><span>${esc(o)}</span></label>`).join('')}</div>`;
+    if (sq.kind === 'photo') return `<div class="sv-photo">${v ? `<img data-img="${esc(v)}" alt=""><button type="button" data-rm="${sq.id}">写真を外す</button>` : ''}
+      <label class="up file">📷 ${v ? '写真を選び直す' : '写真を選ぶ'}<input type="file" accept="image/*" data-photo="${sq.id}"></label></div>`;
+    return '';
+  }
+  function renderForm() {
+    mode = 'form'; view.dataset.v = 'form';
+    $('meName').textContent = form.name;
+    view.innerHTML = `<div class="sv-form">
+      <p class="sub sv-lead"><b>${esc(form.name)}</b> さんの回答　<button class="linkbtn" id="chg">名前を変える</button></p>
+      ${qs().map((sq, i) => `<section class="sv-q ${sq.face ? 'sv-face' : ''}"><label for="f_${sq.id}"><span class="sv-n">${sq.face ? '📷' : 'Q' + (qs()[0].face ? i : i + 1)}</span>${esc(sq.label)}${sq.req ? '<span class="req">必須</span>' : ''}</label>
+        ${sq.face ? '<p class="mini" style="margin:-4px 0 0">当日スクリーンに表示されます。顔がはっきり写った、明るい写真がおすすめです。</p>' : ''}${field(sq)}</section>`).join('')}
+      <p class="mini">${qs().some(q => q.req) ? '「必須」以外の' : ''}答えにくい質問は空欄のままで大丈夫です。回答はクイズの問題に使われ、お名前とあわせて当日スクリーンに映ることがあります。</p>
+      <button class="primary send" id="sendBtn">回答を送信する</button><p class="err" id="err"></p></div>`;
+    Q.hydrateImages(view);
+    $('chg').onclick = () => { mode = 'pick'; view.dataset.v = ''; render(); };
+    $('sendBtn').onclick = submit;
+  }
+  view.addEventListener('input', e => {
+    const t = e.target; if (!t.dataset.q) return;
+    form.a[t.dataset.q] = t.type === 'number' ? (t.value === '' ? null : Number(t.value)) : t.value;
+  });
+  view.addEventListener('change', async e => {
+    const t = e.target;
+    if (t.dataset.q && (t.type === 'radio' || t.tagName === 'SELECT')) { form.a[t.dataset.q] = t.value || null; return; }
+    if (t.dataset.photo) {
+      const f = t.files[0]; if (!f) return;
+      try {
+        const data = await Q.compressImage(f);
+        const id = 'sv_' + uid();
+        await E.set('images/' + id, data);
+        form.a[t.dataset.photo] = id;
+        keepAndRedraw();
+        Q.toast('写真を追加しました', 'info');
+      } catch (err) { Q.toast('写真を読み込めませんでした。JPEGかPNGを選んでください', 'warn'); }
+    }
+  });
+  view.addEventListener('click', e => {
+    const b = e.target.closest('[data-rm]'); if (!b) return;
+    form.a[b.dataset.rm] = null; keepAndRedraw();
+  });
+  function keepAndRedraw() { const y = scrollY; renderForm(); scrollTo(0, y); }
+
+  async function submit() {
+    const a = {};
+    Object.entries(form.a).forEach(([k, v]) => { if (v !== null && v !== undefined && String(v).trim() !== '') a[k] = typeof v === 'string' ? v.trim() : v; });
+    const miss = qs().filter(q => q.req && a[q.id] == null);
+    if (miss.length) { $('err').textContent = '必須の質問に答えてください：' + miss.map(q => q.face ? '顔写真' : q.label).join('、'); return; }
+    if (!Object.keys(a).length) { $('err').textContent = '1つ以上答えてください'; return; }
+    $('sendBtn').disabled = true;
+    const rec = { name: form.name, at: Store.now(), dev: devId(), a };
+    if (form.rid) rec.rid = form.rid;
+    await E.set('surveyAns/' + who, rec);
+    Q.toast('回答を送信しました');
+    mode = 'auto'; view.dataset.v = ''; render();
+  }
+
+  // ---------- 送信後 ----------
+  function renderDone(mine) {
+    const sig = 'done|' + JSON.stringify(mine.a);
+    if (view.dataset.v === sig) return;
+    view.dataset.v = sig;
+    view.innerHTML = `<div class="center"><div style="font-size:54px">🙌</div><div class="big">回答ありがとうございます</div>
+      <p class="sub">${esc(mine.name)} さんの回答を受け付けました。<br>ご協力ありがとうございました！</p></div>
+      <div class="keylist sv-sum">${qs().map(sq => `<div><span class="sub">${esc(sq.face ? '顔写真' : sq.label)}</span><br>${
+        sq.kind === 'photo' ? (mine.a[sq.id] ? '<img data-img="' + esc(mine.a[sq.id]) + '" alt="">' : '－') : esc(Q.surveyText(sq, mine.a[sq.id]) || '－')}</div>`).join('')}</div>
+      <button class="send" id="editBtn">回答を修正する</button>`;
+    Q.hydrateImages(view);
+    $('editBtn').onclick = () => start(who, mine.name, mine.rid || null);
+  }
+})();
+</script>
+</body>
+</html>
