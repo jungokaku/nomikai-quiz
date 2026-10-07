@@ -48,6 +48,7 @@
         <div class="menu-ev" id="evName"></div>
         <button id="btnSwitch">開催を切り替え</button>
         <a href="admin.html" target="_blank" class="mlink">問題作成を開く ↗</a>
+        <label class="menu-sel">締切の音<select id="selClose" aria-label="締切の音"></select></label>
         <button id="btnReset" class="danger">参加者と得点をリセット</button>
         <p class="keys">Space / → 次へ　T ヒント<br>H 操作バーを隠す　M BGM</p>
       </div>
@@ -165,6 +166,9 @@
     $('btnBgm').onclick = () => { setTgl($('btnBgm'), Sound.toggleBgm()); };
     $('btnSfx').onclick = () => { setTgl($('btnSfx'), Sound.toggleSfx()); };
     setTgl($('btnBgm'), Sound.bgmOn); setTgl($('btnSfx'), Sound.sfxOn);
+    const sc = $('selClose');
+    sc.innerHTML = Object.entries(Sound.CLOSE_SOUNDS).map(([k, n]) => `<option value="${k}" ${Sound.closeSound === k ? 'selected' : ''}>${n}</option>`).join('');
+    sc.onchange = () => { Sound.closeSound = sc.value; Sound.unlock(); Sound.playClose(); };   // 選ぶと試し聞き
     $('btnSwitch').onclick = () => { if (confirm('ほかの開催に切り替えますか？')) { Sound.bgm(null); Q.leaveEvent(); } };
     $('btnReset').onclick = () => {
       if (!confirm('この開催の参加者・回答・得点をすべて消して最初からにしますか？（問題と名簿は残ります）')) return;
@@ -209,7 +213,7 @@
     else Sound.bgm(null);
     if (first) return;                         // 開いた直後は効果音を鳴らさない
     if (ph === 'question') Sound.play('question');
-    if (ph === 'closed') Sound.play('buzzer');
+    if (ph === 'closed') Sound.playClose();
     if (ph === 'reveal') Sound.play('reveal');
     if (ph === 'spotlight') Sound.play('spot');
     if (ph === 'ranking' && isFinal()) Sound.play('fanfare');

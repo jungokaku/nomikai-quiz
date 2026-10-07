@@ -657,3 +657,5 @@ body.survey #editBtn { margin-top: 14px; }
 .bk-bar span { display: block; height: 100%; background: var(--mint); transition: width .3s; }
 .bk-msg { color: var(--ok); font-weight: 700; }
 .row .chk input, .chk input[type=checkbox] { flex: none; min-width: 0; width: auto; }
+#controls .menu .menu-sel { display: grid; gap: 4px; font-size: 12px; font-weight: 700; color: var(--ink-2); }
+#controls .menu .menu-sel select { max-width: none; width: 100%; }

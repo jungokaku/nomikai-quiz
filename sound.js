@@ -62,6 +62,29 @@
     o.connect(g); g.connect(bus); o.start(t); o.stop(t + 0.25);
   }
 
+  // 卓上ベル：倍音を重ねて、指数的に減衰させる
+  function bell(f, t, dur, peak) {
+    [[1, 1], [2.76, .45], [5.4, .25], [8.93, .12]].forEach(([r, g]) => {
+      const o = ctx.createOscillator(), gn = ctx.createGain();
+      o.type = 'sine'; o.frequency.setValueAtTime(f * r, t);
+      gn.gain.setValueAtTime(0.0001, t);
+      gn.gain.linearRampToValueAtTime(peak * g, t + 0.004);
+      gn.gain.exponentialRampToValueAtTime(0.0001, t + dur / (r > 1 ? r * 0.6 : 1));
+      o.connect(gn); gn.connect(sfxBus); o.start(t); o.stop(t + dur + 0.05);
+    });
+  }
+  // ホイッスル：高い音に細かい揺れ（トリル）を付ける
+  function whistle(t, dur) {
+    const o = ctx.createOscillator(), g = ctx.createGain(), lfo = ctx.createOscillator(), lg = ctx.createGain();
+    o.type = 'sine'; o.frequency.value = 2900;
+    lfo.frequency.value = 38; lg.gain.value = 70; lfo.connect(lg); lg.connect(o.frequency);
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.5, t + 0.015);
+    g.gain.setValueAtTime(0.5, t + dur - 0.03); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(sfxBus);
+    o.start(t); lfo.start(t); o.stop(t + dur + 0.05); lfo.stop(t + dur + 0.05);
+    noise(t, dur, { gain: 0.03, ftype: 'bandpass', freq: 3000 });
+  }
+
   // ========== 効果音 ==========
   const SFX = {
     // 出題：駆け上がるジングル
@@ -76,12 +99,24 @@
       const t = ctx.currentTime + 0.01;
       tone(last ? 1320 : 990, t, 0.07, { type: 'sine', gain: 0.25 });
     },
-    // 締切のブザー
-    buzzer() {
+    // 締切の音（3種類から選べる。初期設定はベル）
+    closeBell() {
       const t = ctx.currentTime + 0.02;
-      tone(98, t, 0.9, { type: 'sawtooth', gain: 0.22, lp: 1400, release: 0.15 });
-      tone(104, t, 0.9, { type: 'sawtooth', gain: 0.22, lp: 1400, release: 0.15 });
-      tone(196, t, 0.9, { type: 'square', gain: 0.08, lp: 1200, release: 0.15 });
+      bell(1568, t, 1.6, 0.55); bell(1568, t + 0.32, 2.2, 0.5);      // チーン、チーン（G6）
+    },
+    closeWhistle() {
+      const t = ctx.currentTime + 0.02;
+      whistle(t, 0.12); whistle(t + 0.2, 0.12); whistle(t + 0.4, 0.75); // ピッ、ピッ、ピーッ
+    },
+    closeStinger() {
+      const t = ctx.currentTime + 0.02;
+      [60, 64, 67, 72, 76].forEach(m => {                              // ジャン！（Cメジャー）
+        tone(mtof(m), t, 0.9, { type: 'sawtooth', gain: 0.09, lp: 3200, attack: 0.004, release: 0.6 });
+        tone(mtof(m), t, 0.9, { type: 'triangle', gain: 0.07, release: 0.6, detune: 6 });
+      });
+      tone(mtof(48), t, 0.6, { type: 'triangle', gain: 0.3, release: 0.4 });
+      noise(t, 0.6, { gain: 0.22, freq: 5000 });
+      kick(t, sfxBus);
     },
     // 正解発表：ドラムロール → ピンポーン
     reveal() {
@@ -185,6 +220,11 @@
       if (fileAudio) { fileAudio.pause(); fileAudio = null; }
       if (mode === 'party') { const m = mode; mode = null; setMode(m); }
     },
+    // 締切の音：bell / whistle / stinger（このPCに記憶）
+    CLOSE_SOUNDS: { bell: 'ベル（チーン）', whistle: 'ホイッスル（ピッピッピー）', stinger: 'ジャン！' },
+    get closeSound() { try { return localStorage.getItem('quizsnd_close') || 'bell'; } catch (e) { return 'bell'; } },
+    set closeSound(v) { try { localStorage.setItem('quizsnd_close', v); } catch (e) {} },
+    playClose() { const k = this.closeSound; this.play('close' + k.charAt(0).toUpperCase() + k.slice(1)); },
     get bgmOn() { return bgmOn; }, get sfxOn() { return sfxOn; },
     toggleBgm() { bgmOn = !bgmOn; lsSet('bgm', bgmOn); if (ensure()) bgmBus.gain.setTargetAtTime(bgmOn ? 0.22 : 0, ctx.currentTime, 0.05); return bgmOn; },
     toggleSfx() { sfxOn = !sfxOn; lsSet('sfx', sfxOn); if (ensure()) sfxBus.gain.setTargetAtTime(sfxOn ? 0.7 : 0, ctx.currentTime, 0.05); return sfxOn; },
