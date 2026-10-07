@@ -84,6 +84,7 @@
     choice: { name: '選択（1位当て・2択など）', short: '選択' },
     order:  { name: '並び替え（A〜に①〜を割り当て）', short: '並び替え' },
     match:  { name: '写真マッチング（A〜と写真①〜）', short: '写真マッチ' },
+    pair:   { name: '言葉マッチング（A〜と言葉①〜）', short: '言葉マッチ' },
     group:  { name: 'グループ分け', short: 'グループ分け' }
   };
 
@@ -97,6 +98,7 @@
   }
   function slotLabel(q, k) {
     if (q.type === 'group') return (toArr(q.slots)[k] || {}).text || ('G' + (k + 1));
+    if (q.type === 'pair') { const t = (toArr(q.slots)[k] || {}).text; return (CIRCLED[k] || String(k + 1)) + (t ? ' ' + t : ''); }
     return CIRCLED[k] || String(k + 1);
   }
 

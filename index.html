@@ -179,6 +179,9 @@
     const q = curQ;
     initLocal(q);
     let h = `<div class="p-q"><span class="p-timer" id="pTimer"></span>${esc(q.title)}</div>`;
+    const hs = toArr(state.hints);
+    if (hs.length) h += `<div class="p-hints">${hs.map((t, i) => `<div><b>ヒント${i + 1}</b>${esc(t)}</div>`).join('')}</div>`;
+    if (pts(q) !== 1) h += `<p class="p-pts">この問題は配点 ×${fmt(pts(q))}</p>`;
     if (q.type === 'choice') {
       const opts = toArr(q.options);
       if (opts.some(o => o.img)) h += '<p class="sub howto">スクリーンの画像を見て、番号を選んでください</p>';
@@ -188,28 +191,29 @@
       view.dataset.h = ''; view.innerHTML = h; updateTimer(); return;
     }
     if (q.type === 'order') h += orderHtml(q);
-    if (q.type === 'match') h += matchHtml(q);
+    if (isMatch(q)) h += matchHtml(q);
     if (q.type === 'group') h += groupHtml(q);
     const full = local.value.every(v => v != null), same = sameAsSent();
     h += `<div class="summary">${summaryHtml(q)}</div>
       <button class="primary send" id="sendBtn" ${full && !same ? '' : 'disabled'}>${same ? '✓ 送信済み' : myAns ? '変更して送信' : '送信'}</button>
       <div class="status ${same ? 'ok' : ''}">${same ? '締切まで変更できます' : myAns ? '未送信の変更があります' : full ? '確認して送信してください' : hintText(q)}</div>`;
     view.dataset.h = ''; view.innerHTML = h;
-    if (q.type === 'match') drawLines();
+    if (isMatch(q)) drawLines();
     updateTimer();
   }
   function updateTimer() { const r = remaining(), t = document.getElementById('pTimer'); if (t && r != null) t.textContent = '⏱ ' + Math.max(0, r); }
   function hintText(q) {
-    if (q.type === 'match') return '左の点から右の点へ線を引いてください';
+    if (isMatch(q)) return '左の点から右の点へ線を引いてください';
     if (q.type === 'group') return 'すべて箱に入れてから送信';
     return '';
   }
+  const pts = q => Number(q && q.points) || 1;
   const itemName = (q, i) => esc(toArr(q.items)[i].text || '（画像）');
 
   function summaryHtml(q) {
     const items = toArr(q.items);
     if (q.type === 'order') return local.order.map((it, pos) => `${CIRCLED[pos]} ${itemName(q, it)}`).join('　');
-    if (q.type === 'match') return items.map((_, i) => `${LETTERS[i]}→${local.value[i] == null ? '？' : CIRCLED[local.value[i]]}`).join('　');
+    if (isMatch(q)) return items.map((_, i) => `${LETTERS[i]}→${local.value[i] == null ? '？' : CIRCLED[local.value[i]]}`).join('　');
     if (q.type === 'group') return toArr(q.slots).map((s, g) => `<b>${esc(s.text)}</b>：${items.map((_, i) => (local.value[i] === g ? LETTERS[i] : '')).filter(Boolean).join('・') || '－'}`).join('　');
     return '';
   }
@@ -218,14 +222,16 @@
   function orderHtml(q) {
     const n = local.order.length;
     return `<p class="sub howto">≡ をつかんで上下に動かす（2つをタップで入れ替えも可）</p>
+      ${q.topLabel ? `<div class="olabel-p">▲ ${esc(q.topLabel)}</div>` : ''}
       <div class="ord" id="ord" style="height:${n * PITCH}px">
       ${local.order.map((_, pos) => `<div class="ordnum" style="top:${pos * PITCH}px">${CIRCLED[pos]}</div>`).join('')}
       ${local.order.map((it, pos) => `<div class="ocard ${local.sel === pos ? 'picked' : ''}" data-pos="${pos}" style="top:${pos * PITCH}px">
         <b>${LETTERS[it]}</b><span class="ot">${itemName(q, it)}</span><span class="grip">≡</span></div>`).join('')}
-      </div>`;
+      </div>${q.bottomLabel ? `<div class="olabel-p">▼ ${esc(q.bottomLabel)}</div>` : ''}`;
   }
 
-  // ===== 写真マッチング（線つなぎ） =====
+  // ===== 写真マッチング・言葉マッチング（線つなぎ） =====
+  const isMatch = q => q.type === 'match' || q.type === 'pair';
   function matchHtml(q) {
     const items = toArr(q.items), slots = toArr(q.slots);
     const usedR = new Set(local.value.filter(v => v != null));
@@ -234,7 +240,7 @@
         <div class="mcol">${items.map((_, i) => `<div class="mcard L ${local.value[i] != null ? 'on' : ''} ${local.sel && local.sel.side === 'l' && local.sel.idx === i ? 'picked' : ''}" data-l="${i}">
           <b>${LETTERS[i]}</b><span class="mtxt">${itemName(q, i)}</span><span class="dot" style="background:${LINE_COLORS[i % 8]}"></span></div>`).join('')}</div>
         <div class="mcol">${slots.map((_, k) => `<div class="mcard R ${usedR.has(k) ? 'on' : ''} ${local.sel && local.sel.side === 'r' && local.sel.idx === k ? 'picked' : ''}" data-r="${k}">
-          <span class="dot"></span><b>${CIRCLED[k]}</b><span class="mtxt sub">の写真</span></div>`).join('')}</div>
+          <span class="dot"></span><b>${CIRCLED[k]}</b>${q.type === 'pair' ? `<span class="mtxt wtxt">${esc(slots[k].text || '')}</span>` : '<span class="mtxt sub">の写真</span>'}</div>`).join('')}</div>
       </div>`;
   }
   function dotCenter(el) {
@@ -283,7 +289,7 @@
       e.preventDefault();
       drag = { kind: 'order', el: c, from: +c.dataset.pos, to: +c.dataset.pos, y0: e.clientY, moved: false };
       c.classList.add('dragging');
-    } else if (t === 'match') {
+    } else if (t === 'match' || t === 'pair') {
       const c = e.target.closest('[data-l],[data-r]'); if (!c) return;
       e.preventDefault();
       const side = c.hasAttribute('data-l') ? 'l' : 'r';
@@ -407,25 +413,26 @@
   function renderReveal() {
     const q = curQ, key = state.revealKey, total = scores[pid] || 0;
     let cls = 'ng', big = '残念…', sub = '';
+    const nt = o => (o && o.note ? `<span class="knote">${esc(o.note)}</span>` : '');
     if (!myAns) { big = '未回答'; }
     else if (myRes == null) { big = '集計中…'; cls = ''; }
-    else if (myRes >= 0.999) { cls = 'ok'; big = '正解！'; sub = '+1点'; }
+    else if (myRes >= pts(q) * 0.999) { cls = 'ok'; big = '正解！'; sub = `+${fmt(myRes)}点`; }
     else if (myRes > 0) { cls = 'part'; big = '部分正解'; sub = `+${fmt(myRes)}点`; }
     let keyHtml = '';
     if (key != null) {
       if (q.type === 'choice') {
         const o = toArr(q.options)[key] || {};
-        keyHtml = `<div class="keylist">正解：<b>${Number(key) + 1}</b> ${esc(o.text || '')}</div>`;
+        keyHtml = `<div class="keylist">正解：<b>${Number(key) + 1}</b> ${esc(o.text || '')}${nt(o)}</div>`;
       } else {
         const mine = myAns ? toArr(myAns.v) : [];
         keyHtml = `<div class="keylist"><div class="sub">正解</div>${toArr(q.items).map((it, i) => {
           const ok = myAns && Number(mine[i]) === Number(toArr(key)[i]);
-          return `<div>${myAns ? (ok ? '✅' : '❌') : ''} <b>${LETTERS[i]}</b> ${esc(it.text || '')} → <b>${esc(slotLabel(q, Number(toArr(key)[i])))}</b></div>`;
+          return `<div>${myAns ? (ok ? '✅' : '❌') : ''} <b>${LETTERS[i]}</b> ${esc(it.text || '')} → <b>${esc(slotLabel(q, Number(toArr(key)[i])))}</b>${nt(it)}</div>`;
         }).join('')}</div>`;
       }
     }
     setView(`<div class="result ${cls}"><div class="big">${big}</div><div style="font-size:24px">${sub}</div></div>
-      ${keyHtml}<p class="center sub" style="padding:14px">現在の合計：<b style="color:var(--text)">${fmt(total)}点</b></p>`);
+      ${keyHtml}${q.explain ? `<div class="keylist explain-p"><div class="sub">説明</div>${esc(q.explain)}</div>` : ''}<p class="center sub" style="padding:14px">現在の合計：<b style="color:var(--text)">${fmt(total)}点</b></p>`);
     if (cls === 'ok' && celebrated !== q.id) { celebrated = q.id; Q.confetti({ count: 110 }); Q.vibrate([30, 40, 30]); }
   }
 

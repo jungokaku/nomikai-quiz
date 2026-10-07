@@ -137,11 +137,12 @@
   }, 0));
 
   // ---------- 下書き（編集用の形）----------
-  function blankEntry() { return { text: '', img: '', photo: '', group: 0 }; }
+  function blankEntry() { return { text: '', img: '', photo: '', word: '', group: 0, note: '' }; }
   function blankDraft(type) {
     return {
-      id: null, type, title: '', timeLimit: 30, shuffle: true,
-      options: [{ text: '', img: '' }, { text: '', img: '' }], correct: 0,
+      id: null, type, title: '', timeLimit: 30, shuffle: true, points: 1,
+      hints: [], explain: '', topLabel: '', bottomLabel: '',
+      options: [{ text: '', img: '', note: '' }, { text: '', img: '', note: '' }], correct: 0,
       entries: [blankEntry(), blankEntry(), blankEntry(), blankEntry()],
       groups: ['グループ1', 'グループ2']
     };
@@ -149,18 +150,22 @@
   function toDraft(q, key) {
     const d = blankDraft(q.type);
     d.id = q.id; d.title = q.title || ''; d.timeLimit = q.timeLimit || 0;
+    d.points = Number(q.points) || 1; d.hints = toArr(q.hints).slice(); d.explain = q.explain || '';
+    d.topLabel = q.topLabel || ''; d.bottomLabel = q.bottomLabel || '';
     const items = toArr(q.items), slots = toArr(q.slots), k = toArr(key);
     if (q.type === 'choice') {
-      d.options = toArr(q.options).map(o => ({ text: o.text || '', img: o.img || '' }));
+      d.options = toArr(q.options).map(o => ({ text: o.text || '', img: o.img || '', note: o.note || '' }));
       d.correct = Number(key) || 0;
     } else if (q.type === 'order') {
-      d.entries = items.map((it, j) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', _r: Number(k[j]) }))
+      d.entries = items.map((it, j) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', note: it.note || '', _r: Number(k[j]) }))
         .sort((a, b) => a._r - b._r).map(({ _r, ...e }) => e);
     } else if (q.type === 'match') {
-      d.entries = items.map((it, i) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', photo: (slots[Number(k[i])] || {}).img || '' }));
+      d.entries = items.map((it, i) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', note: it.note || '', photo: (slots[Number(k[i])] || {}).img || '' }));
+    } else if (q.type === 'pair') {
+      d.entries = items.map((it, i) => ({ ...blankEntry(), text: it.text || '', note: it.note || '', word: (slots[Number(k[i])] || {}).text || '' }));
     } else if (q.type === 'group') {
       d.groups = slots.map(s => s.text || '');
-      d.entries = items.map((it, i) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', group: Number(k[i]) || 0 }));
+      d.entries = items.map((it, i) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', note: it.note || '', group: Number(k[i]) || 0 }));
       d.shuffle = false;
     }
     return d;
@@ -173,14 +178,19 @@
   // 下書き → 保存する形（問題 q と正解 key）。エラーがあれば errors に入れる
   function fromDraft(d) {
     const errors = [];
-    const q = { id: d.id || uid(), type: d.type, title: d.title.trim(), timeLimit: Math.max(0, parseInt(d.timeLimit, 10) || 0) };
+    const q = { id: d.id || uid(), type: d.type, title: d.title.trim(), timeLimit: Math.max(0, parseInt(d.timeLimit, 10) || 0),
+      points: Number(d.points) || 1 };
+    const hints = d.hints.map(h => (h || '').trim()).filter(Boolean).slice(0, 5);
+    if (hints.length) q.hints = hints;
+    if ((d.explain || '').trim()) q.explain = d.explain.trim();
+    const nt = o => ((o && o.note) || '').trim();
     let key;
     if (!q.title) errors.push('問題文を入力してください');
     const has = e => (e.text || '').trim() || e.img;
     if (d.type === 'choice') {
       if (d.options.length < 2) errors.push('選択肢は2つ以上必要です');
       if (d.options.some(o => !has(o))) errors.push('空の選択肢があります（文字か画像を入れてください）');
-      q.options = d.options.map(o => ({ text: (o.text || '').trim(), img: o.img || '' }));
+      q.options = d.options.map(o => ({ text: (o.text || '').trim(), img: o.img || '', note: nt(o) }));
       key = Math.min(d.correct, d.options.length - 1);
     } else {
       const E = d.entries;
@@ -188,21 +198,29 @@
       if (E.some(e => !has(e))) errors.push('空の項目があります（文字か画像を入れてください）');
       if (d.type === 'order') {
         const p = shuffled(E.length, d.shuffle);           // p[j] = 表示位置jに来る項目の正解順位
-        q.items = p.map(r => ({ text: E[r].text.trim(), img: E[r].img || '' }));
+        q.items = p.map(r => ({ text: E[r].text.trim(), img: E[r].img || '', note: nt(E[r]) }));
         q.slots = E.map(() => ({ text: '', img: '' }));
         key = p.slice();
+        if (d.topLabel.trim()) q.topLabel = d.topLabel.trim();
+        if (d.bottomLabel.trim()) q.bottomLabel = d.bottomLabel.trim();
       } else if (d.type === 'match') {
         if (E.some(e => !e.photo)) errors.push('写真が入っていない項目があります');
         const s = shuffled(E.length, true);                // s[k] = 写真番号kに来る項目
-        q.items = E.map(e => ({ text: e.text.trim(), img: e.img || '' }));
+        q.items = E.map(e => ({ text: e.text.trim(), img: e.img || '', note: nt(e) }));
         q.slots = s.map(i => ({ text: '', img: E[i].photo || '' }));
+        key = E.map((_, i) => s.indexOf(i));
+      } else if (d.type === 'pair') {
+        if (E.some(e => !(e.word || '').trim())) errors.push('右側の言葉が空の行があります');
+        const s = shuffled(E.length, true);                // s[k] = 言葉の番号kに来る項目
+        q.items = E.map(e => ({ text: e.text.trim(), img: '', note: nt(e) }));
+        q.slots = s.map(i => ({ text: (E[i].word || '').trim(), img: '' }));
         key = E.map((_, i) => s.indexOf(i));
       } else if (d.type === 'group') {
         const G = d.groups.map(g => (g || '').trim());
         if (G.length < 2) errors.push('グループは2つ以上必要です');
         if (G.some(g => !g)) errors.push('グループ名が空です');
         const p = shuffled(E.length, d.shuffle);
-        q.items = p.map(i => ({ text: E[i].text.trim(), img: E[i].img || '' }));
+        q.items = p.map(i => ({ text: E[i].text.trim(), img: E[i].img || '', note: nt(E[i]) }));
         q.slots = G.map(g => ({ text: g, img: '' }));
         key = p.map(i => Math.min(Number(E[i].group) || 0, G.length - 1));
       }
@@ -216,15 +234,18 @@
   }
 
   // ---------- 一覧 ----------
+  const PTS = [0.5, 1, 1.5, 2, 3, 5, 10];
   function renderList() {
     const qs = sortedQuestions(questions);
-    document.getElementById('qcount').textContent = qs.length + '問';
+    const total = qs.reduce((a, q) => a + (Number(q.points) || 1), 0);
+    document.getElementById('qcount').textContent = qs.length + '問' + (qs.length ? `・満点 ${Q.fmt(total)}点` : '');
     const el = document.getElementById('qlist');
     if (!qs.length) { el.innerHTML = '<p class="sub">まだ問題がありません。「新しい問題」から作成してください。</p>'; return; }
     el.innerHTML = qs.map((q, i) => `
       <div class="qitem ${draft && draft.id === q.id ? 'active' : ''}">
         <div><div class="t">Q${i + 1}. ${esc(q.title)}</div><span class="badge">${esc(TYPES[q.type].short)}</span>
-          ${q.timeLimit ? `<span class="sub">　${q.timeLimit}秒</span>` : ''}</div>
+          ${q.timeLimit ? `<span class="sub">　${q.timeLimit}秒</span>` : ''}${toArr(q.hints).length ? `<span class="sub">　ヒント${toArr(q.hints).length}</span>` : ''}
+          <label class="ptsel">配点<select data-pts="${q.id}" aria-label="Q${i + 1}の配点倍率">${PTS.map(v => `<option value="${v}" ${Number(q.points || 1) === v ? 'selected' : ''}>×${v}</option>`).join('')}</select></label></div>
         <div class="ops">
           <button data-op="up" data-id="${q.id}" ${i === 0 ? 'disabled' : ''}>↑</button>
           <button data-op="down" data-id="${q.id}" ${i === qs.length - 1 ? 'disabled' : ''}>↓</button>
@@ -233,6 +254,12 @@
         </div>
       </div>`).join('');
   }
+  document.getElementById('qlist').addEventListener('change', async e => {
+    const s = e.target.closest('select[data-pts]'); if (!s) return;
+    await E.set('questions/' + s.dataset.pts + '/points', Number(s.value));
+    if (draft && draft.id === s.dataset.pts) { draft.points = Number(s.value); renderEditor(); }
+    toast(`配点を ×${s.value} にしました`);
+  });
   document.getElementById('qlist').addEventListener('click', async e => {
     const b = e.target.closest('button[data-op]'); if (!b) return;
     const qs = sortedQuestions(questions);
@@ -276,7 +303,11 @@
         <button data-act="add" data-list="options" ${d.options.length >= 6 ? 'disabled' : ''}>＋ 選択肢を追加</button>
         <p class="mini">例：「1位は誰？」は候補を並べて1つ正解に。「どっちがAさんの絵？」は画像2枚を入れて正解を選択。</p></div>`;
     } else if (d.type === 'order') {
-      body = `<div class="field"><label>項目を<b>正解の順番（①が先頭）</b>で入力してください</label>
+      body = `<div class="field"><label>並べる基準（任意・スクリーンとスマホに表示）</label>
+        <div class="row"><input data-f="topLabel" value="${esc(d.topLabel)}" placeholder="一番上（例：北）" maxlength="12">
+          <span class="pairarrow">→</span><input data-f="bottomLabel" value="${esc(d.bottomLabel)}" placeholder="一番下（例：南）" maxlength="12"></div>
+        <p class="mini">例：「出身地が北の人から順番に」→ 一番上「北」、一番下「南」。空欄なら表示しません。</p></div>
+        <div class="field"><label>項目を<b>正解の順番（①が先頭）</b>で入力してください</label>
         ${d.entries.map((e, i) => `<div class="erow">
           <div class="lab">${CIRCLED[i]}</div>
           <input data-list="entries" data-i="${i}" data-k="text" value="${esc(e.text)}" placeholder="項目名（例：田中さん）">
@@ -296,6 +327,17 @@
         </div>`).join('')}
         <button data-act="add" data-list="entries" ${d.entries.length >= 8 ? 'disabled' : ''}>＋ ペアを追加</button>
         <p class="mini">例：「子どもの頃の写真は誰？」→ A 田中さん＋田中さんの写真…</p></div>`;
+    } else if (d.type === 'pair') {
+      body = `<div class="field"><label>左の言葉と<b>正解の右の言葉</b>をペアで入力（右側の①②…の番号は保存時に自動でシャッフル）</label>
+        ${d.entries.map((e, i) => `<div class="erow pairrow">
+          <div class="lab">${LETTERS[i]}</div>
+          <input data-list="entries" data-i="${i}" data-k="text" value="${esc(e.text)}" placeholder="左（例：田中さん）">
+          <span class="pairarrow" aria-hidden="true">↔</span>
+          <input data-list="entries" data-i="${i}" data-k="word" value="${esc(e.word || '')}" placeholder="右（例：カレーが大好き）">
+          <div class="ctrl"><button data-act="del" data-list="entries" data-i="${i}" ${d.entries.length <= 2 ? 'disabled' : ''}>削除</button></div>
+        </div>`).join('')}
+        <button data-act="add" data-list="entries" ${d.entries.length >= 8 ? 'disabled' : ''}>＋ ペアを追加</button>
+        <p class="mini">例：「好きな食べ物はどれ？」→ A 田中さん ↔ カレー、B 佐藤さん ↔ ラーメン…。右側の言葉は短め（15文字くらいまで）がスマホで見やすくなります。</p></div>`;
     } else if (d.type === 'group') {
       body = `<div class="field"><label>グループ名</label>
         ${d.groups.map((g, i) => `<div class="erow" style="grid-template-columns:34px 1fr auto">
@@ -320,10 +362,34 @@
       <div class="field"><label>問題文</label><textarea data-f="title" rows="2" placeholder="例：パクチーを食べられるのは誰？">${esc(d.title)}</textarea></div>
       <div class="field"><label>制限時間（秒・0で無制限）</label><input type="number" min="0" step="5" data-f="timeLimit" value="${d.timeLimit}" style="width:120px"></div>
       ${body}
+      ${extrasHtml(d)}
       <p class="err" id="errs"></p>
       <div class="a-actions"><button class="primary" data-act="save">保存</button>
         ${d.id ? '<button data-act="cancel">新規作成に戻る</button>' : ''}</div>`;
     Q.hydrateImages(el);
+  }
+
+  // 配点・ヒント・説明（すべて任意）
+  function extrasHtml(d) {
+    const lab = i => d.type === 'choice' ? String(i + 1) : d.type === 'order' ? CIRCLED[i] : LETTERS[i];
+    const src = d.type === 'choice' ? d.options : d.entries;
+    const listKey = d.type === 'choice' ? 'options' : 'entries';
+    const nm = o => esc((o.text || '').trim() || (o.img ? '（画像）' : '（未入力）'));
+    return `<div class="extras">
+      <div class="field"><label>配点倍率</label>
+        <select data-f="points" style="width:auto">${PTS.map(v => `<option value="${v}" ${Number(d.points) === v ? 'selected' : ''}>×${v}（満点 ${Q.fmt(v)}点）</option>`).join('')}</select>
+        <p class="mini">問題一覧からも変更できます。</p></div>
+      <div class="field"><label>ヒント（任意・最大5つ。進行画面の「ヒント」ボタンで1つずつ表示）</label>
+        ${d.hints.map((h, i) => `<div class="erow" style="grid-template-columns:34px 1fr auto"><div class="lab">${i + 1}</div>
+          <input data-list="hints" data-i="${i}" value="${esc(h)}" placeholder="例：寒いところの出身です" maxlength="60">
+          <div class="ctrl"><button data-act="del" data-list="hints" data-i="${i}">削除</button></div></div>`).join('')}
+        <button data-act="add" data-list="hints" ${d.hints.length >= 5 ? 'disabled' : ''}>＋ ヒントを追加</button></div>
+      <div class="field"><label>回答ごとの説明（任意・正解発表のときに表示）</label>
+        ${src.map((o, i) => `<div class="erow notes"><div class="lab">${lab(i)}</div><div class="nname">${nm(o)}</div>
+          <input data-list="${listKey}" data-i="${i}" data-k="note" value="${esc(o.note || '')}" placeholder="例：北海道・札幌市の出身" maxlength="60"></div>`).join('')}</div>
+      <div class="field"><label>全体の説明（任意・正解発表のときに表示）</label>
+        <textarea data-f="explain" rows="2" maxlength="200" placeholder="例：意外と九州出身の人が多い会社でした">${esc(d.explain)}</textarea></div>
+    </div>`;
   }
 
   const ed = document.getElementById('editor');
@@ -350,6 +416,7 @@
     if (t.type === 'checkbox') { draft[t.dataset.f] = t.checked; return; }
     if (t.tagName === 'SELECT') {
       if (t.dataset.f === 'type') { draft.type = t.value; renderEditor(); return; }
+      if (t.dataset.f === 'points') { draft.points = Number(t.value); return; }
       setValue(t, +t.value);
     }
   });
@@ -363,8 +430,9 @@
     const b = e.target.closest('button[data-act]'); if (!b) return;
     const act = b.dataset.act, list = draft[b.dataset.list], i = +b.dataset.i;
     if (act === 'add') {
-      if (b.dataset.list === 'options') list.push({ text: '', img: '' });
+      if (b.dataset.list === 'options') list.push({ text: '', img: '', note: '' });
       else if (b.dataset.list === 'groups') list.push('グループ' + (list.length + 1));
+      else if (b.dataset.list === 'hints') { if (list.length < 5) list.push(''); }
       else list.push(blankEntry());
     }
     if (act === 'del') {

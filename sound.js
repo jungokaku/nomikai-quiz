@@ -91,6 +91,11 @@
       tone(mtof(88), t + roll, 0.35, { type: 'sine', gain: 0.35, release: 0.2 });
       tone(mtof(84), t + roll + 0.3, 0.7, { type: 'sine', gain: 0.35, release: 0.5 });
     },
+    // ヒント表示：キラキラ
+    hint() {
+      const t = ctx.currentTime + 0.01;
+      [84, 88, 91, 96].forEach((m, i) => tone(mtof(m), t + i * 0.05, 0.18, { type: 'sine', gain: 0.16, release: 0.12 }));
+    },
     // 参加したとき
     join() {
       const t = ctx.currentTime + 0.01;
