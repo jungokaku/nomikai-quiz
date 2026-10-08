@@ -22,7 +22,8 @@
   <div class="a-panel">
     <h2>問題一覧 <span class="sub" id="qcount"></span></h2>
     <div class="qlist" id="qlist"></div>
-    <div class="a-actions"><button class="primary" id="btnNew">＋ 新しい問題</button></div>
+    <div class="a-actions"><button class="primary" id="btnNew">＋ 新しい問題</button><button id="btnImport">📥 ファイルから取り込む</button>
+      <input type="file" id="importFile" accept=".json,application/json" hidden></div>
   </div>
   </div>
   <div class="a-main">
@@ -63,6 +64,8 @@
     Store.listen('catalog', v => { catalog = v || {}; meta = catalog[eid] || {}; renderEvent(); document.title = (meta.title || '') + '｜問題作成'; });
     document.getElementById('btnNew').onclick = () => { draft = blankDraft('choice'); renderEditor(); };
     document.getElementById('btnSwitch').onclick = () => Q.leaveEvent();
+    document.getElementById('btnImport').onclick = () => document.getElementById('importFile').click();
+    document.getElementById('importFile').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) importQuestions(f); };
     draft = blankDraft('choice');
     renderEditor();
   }
@@ -260,6 +263,67 @@
     }
     return { q, key, errors };
   }
+  // ---------- ファイルから問題を一括取り込み（JSON） ----------
+  // 形式は README.md の「問題ファイルの一括取り込み」を参照。番号（answer・group・ranks）は1から数える
+  function importToDraft(x) {
+    const errs = [];
+    if (!x || typeof x !== 'object') return { errs: ['問題の形が正しくありません'] };
+    if (x.type === 'match') return { errs: ['写真マッチング（match）は画像が必要なため取り込めません'] };
+    if (!TYPES[x.type]) return { errs: ['type が不明です：' + x.type] };
+    const d = blankDraft(x.type);
+    const str = v => (v == null ? '' : String(v));
+    const ent = v => (v && typeof v === 'object' && !Array.isArray(v) ? v : { text: v });
+    d.title = str(x.title);
+    if (x.timeLimit != null) d.timeLimit = x.timeLimit;
+    if (x.points != null) { d.points = Number(x.points); if (!PTS.includes(d.points)) errs.push('points は ' + PTS.join('・') + ' のどれかにしてください'); }
+    d.hints = toArr(x.hints).map(str);
+    if (d.hints.length > 5) errs.push('ヒントは5つまでです');
+    d.explain = str(x.explain);
+    d.topLabel = str(x.topLabel); d.bottomLabel = str(x.bottomLabel);
+    if (x.shuffle != null) d.shuffle = !!x.shuffle;
+    if (x.type === 'choice') {
+      d.options = toArr(x.options).map(o => { o = ent(o); return { text: str(o.text), img: '', note: str(o.note) }; });
+      const ans = Array.isArray(x.answer) ? x.answer : [x.answer];
+      if (ans.some(a => !(Number(a) >= 1 && Number(a) <= d.options.length))) errs.push('answer は 1〜' + d.options.length + ' の番号にしてください');
+      d.correct = ans.map(a => Number(a) - 1);
+    } else if (x.type === 'order') {
+      const ranks = x.ranks ? toArr(x.ranks).map(Number) : null;
+      d.entries = toArr(x.items).map((o, i) => { o = ent(o); return { ...blankEntry(), text: str(o.text), note: str(o.note), rank: ranks ? ranks[i] : i + 1 }; });
+      if (ranks && (ranks.length !== d.entries.length || ranks.some(r => !(r >= 1)))) errs.push('ranks は items と同じ数の、1以上の数字にしてください');
+    } else if (x.type === 'pair') {
+      d.entries = toArr(x.pairs).map(p => (Array.isArray(p)
+        ? { ...blankEntry(), text: str(p[0]), word: str(p[1]), note: str(p[2]) }
+        : { ...blankEntry(), text: str(p && p.text), word: str(p && p.word), note: str(p && p.note) }));
+    } else if (x.type === 'group') {
+      d.groups = toArr(x.groups).map(str);
+      d.entries = toArr(x.items).map(o => { o = ent(o); return { ...blankEntry(), text: str(o.text), note: str(o.note), group: Number(o.group) - 1 }; });
+      if (d.entries.some(e => !(e.group >= 0 && e.group < d.groups.length))) errs.push('items の group は 1〜' + d.groups.length + ' の番号にしてください');
+    }
+    return { d, errs };
+  }
+  async function importQuestions(file) {
+    let data;
+    try { data = JSON.parse(await file.text()); } catch (e) { alert('ファイルを読み込めませんでした（JSON の形式が正しくありません）\n' + e.message); return; }
+    const list = Array.isArray(data) ? data : toArr(data && data.questions);
+    if (!list.length) { alert('問題が見つかりませんでした（"questions" に問題を並べてください）'); return; }
+    const out = [], problems = [];
+    list.forEach((x, n) => {
+      const r = importToDraft(x);
+      let errs = r.errs;
+      if (r.d) { const f = fromDraft(r.d); errs = errs.concat(f.errors); if (!errs.length) out.push(f); }
+      if (errs.length) problems.push(`${n + 1}問目「${(x && x.title) || ''}」：` + errs.join('／'));
+    });
+    if (problems.length) { alert('取り込みを中止しました。次の問題を直してください。\n\n' + problems.join('\n')); return; }
+    const have = Object.keys(questions).length;
+    if (!confirm(`${out.length}問を取り込みます。` + (have ? `\n今ある${have}問の後ろに追加します。` : ''))) return;
+    let order = have ? Math.max(...Object.values(questions).map(x => x.order || 0)) + 1 : 0;
+    const upd = {};
+    out.forEach(({ q, key }) => { q.order = order++; upd['questions/' + q.id] = q; upd['keys/' + q.id] = key; });
+    await E.update('', upd);
+    if (data && data.title && !have && meta.title !== data.title) toast('ファイルのタイトル：' + data.title + '（開催のタイトルは設定から変更できます）', 'info');
+    toast(out.length + '問を取り込みました');
+  }
+
   function imagesOf(q) {
     const ids = [];
     ['options', 'items', 'slots'].forEach(f => toArr(q[f]).forEach(o => { if (o && o.img && !String(o.img).startsWith('sv_')) ids.push(o.img); }));
