@@ -30,7 +30,7 @@
     <button id="btnClose">締切</button>
     <button id="btnReveal">正解発表</button>
     <button id="btnHint" class="hintbtn hidden">ヒント</button>
-    <button id="btnRank">順位</button>
+    <button id="btnRank" class="rankbtn">🏆 順位（途中経過）</button>
     <button id="btnLobby">参加QR</button>
   </div>
   <div class="cgroup">
@@ -60,7 +60,7 @@
 (function () {
   const { Store, TYPES, LETTERS, esc, fmt, toArr, sortedQuestions, slotLabel } = Q;
   const $ = id => document.getElementById(id);
-  const S = { state: { phase: 'lobby' }, questions: {}, players: {}, answers: {}, keys: {}, results: {}, scores: {}, roster: {} };
+  const S = { state: { phase: 'lobby' }, questions: {}, players: {}, answers: {}, keys: {}, results: {}, scores: {}, roster: {}, hintReq: {} };
   let E = null, EID = '', META = {};
   let lastSig = '', closing = false, lastScene = '', loaded = false, knownPids = null, allDoneFor = '', confettiFor = '';
   let soundScene = '', lastTickSec = null, lastLive = '';
@@ -72,7 +72,7 @@
     EID = eid; META = meta || {};
     E = Q.scope('events/' + eid);
     Q.setImageBase('events/' + eid + '/images/');
-    ['state', 'questions', 'players', 'answers', 'keys', 'results', 'scores', 'roster'].forEach(k => {
+    ['state', 'questions', 'players', 'answers', 'keys', 'results', 'scores', 'roster', 'hintReq'].forEach(k => {
       E.listen(k, v => { S[k] = v || (k === 'state' ? { phase: 'lobby' } : {}); render(); });
     });
     Store.listen('catalog/' + eid, m => {
@@ -103,10 +103,17 @@
   // 参加者に渡す問題：ヒント・説明は抜く（ヒントは出題者が表示したものだけ、説明は正解発表で渡す）
   function publicQ(q) {
     const c = JSON.parse(JSON.stringify(q));
+    c.hintTotal = toArr(q.hints).length;          // ヒントの「数」だけ渡す（中身は出題者が表示したときに渡す）
     delete c.hints; delete c.explain;
     ['options', 'items'].forEach(f => { if (c[f]) toArr(c[f]).forEach(o => { if (o) delete o.note; }); });
     if (c.options) c.options = toArr(c.options); if (c.items) c.items = toArr(c.items);
     return c;
+  }
+  // 出題前の予告画面（Q番号・配点・ヒントの有無）。問題文はまだ見せない
+  function showIntro(idx) {
+    const list = qs(), q = list[idx]; if (!q) return;
+    return E.update('state', { phase: 'intro', qid: q.id, q: null, hints: null, startedAt: null, revealKey: null,
+      intro: { n: idx + 1, total: list.length, points: pts(q), hints: toArr(q.hints).length, type: q.type } });
   }
   function showQuestion(idx) {
     const q = qs()[idx]; if (!q) return;
@@ -136,19 +143,25 @@
   }
   function next() {
     const ph = S.state.phase, i = curIdx(), n = qs().length;
-    if (ph === 'lobby') return showQuestion(i >= 0 && isRevealed(S.state.qid) ? i + 1 : Math.max(i, 0));
+    if (ph === 'lobby') return showIntro(i >= 0 && isRevealed(S.state.qid) ? i + 1 : Math.max(i, 0));
+    if (ph === 'intro') return showQuestion(Math.max(i, 0));
     if (ph === 'question') return doClose();
     if (ph === 'closed') return doReveal();
-    if (ph === 'reveal') return E.update('state', { phase: 'ranking' });
-    if ((ph === 'ranking' || ph === 'spotlight') && i + 1 < n) return showQuestion(i + 1);
+    // 途中経過は毎回は出さない：正解発表の次は次の問題の予告へ（最後の問題だけ最終結果へ）
+    if (ph === 'reveal') return i + 1 < n ? showIntro(i + 1) : E.update('state', { phase: 'ranking' });
+    // 途中で順位を見せた場合：まだ正解発表していない問題があれば、その問題に戻る（締切の状態）
+    if ((ph === 'ranking' || ph === 'spotlight') && i >= 0 && !isRevealed(S.state.qid)) return E.update('state', { phase: 'closed' });
+    if ((ph === 'ranking' || ph === 'spotlight') && i + 1 < n) return showIntro(i + 1);
   }
   function nextLabel() {
     const ph = S.state.phase, i = curIdx(), n = qs().length;
     if (!n) return '問題がありません';
     if (ph === 'lobby') return '▶ 出題スタート';
+    if (ph === 'intro') return '▶ 問題を表示';
     if (ph === 'question') return '▶ 締切';
     if (ph === 'closed') return '▶ 正解発表';
-    if (ph === 'reveal') return '▶ 途中経過';
+    if (ph === 'reveal') return i + 1 < n ? `▶ 次の問題（Q${i + 2}）` : '▶ 最終結果';
+    if ((ph === 'ranking' || ph === 'spotlight') && i >= 0 && !isRevealed(S.state.qid)) return `▶ Q${i + 1}に戻る（正解発表へ）`;
     if (ph === 'ranking' || ph === 'spotlight') return i + 1 < n ? `▶ 次の問題（Q${i + 2}）` : '（全問終了）';
     return '▶ 次へ';
   }
@@ -162,7 +175,7 @@
     $('btnLobby').onclick = () => E.update('state', { phase: 'lobby' });
     $('btnHint').onclick = showHint;
     $('btnSpot').onclick = () => { const p = $('selP').value; if (p) E.update('state', { phase: 'spotlight', spotPid: p }); };
-    $('btnGo').onclick = () => { const i = +$('selQ').value; if (i >= 0) showQuestion(i); };
+    $('btnGo').onclick = () => { const i = +$('selQ').value; if (i >= 0) showIntro(i); };
     $('btnBgm').onclick = () => { setTgl($('btnBgm'), Sound.toggleBgm()); };
     $('btnSfx').onclick = () => { setTgl($('btnSfx'), Sound.toggleSfx()); };
     setTgl($('btnBgm'), Sound.bgmOn); setTgl($('btnSfx'), Sound.sfxOn);
@@ -172,7 +185,7 @@
     $('btnSwitch').onclick = () => { if (confirm('ほかの開催に切り替えますか？')) { Sound.bgm(null); Q.leaveEvent(); } };
     $('btnReset').onclick = () => {
       if (!confirm('この開催の参加者・回答・得点をすべて消して最初からにしますか？（問題と名簿は残ります）')) return;
-      E.update('', { players: null, answers: null, results: null, scores: null, state: { phase: 'lobby' } });
+      E.update('', { players: null, answers: null, results: null, scores: null, hintReq: null, state: { phase: 'lobby' } });
       confettiFor = ''; allDoneFor = '';
     };
     document.addEventListener('keydown', e => {
@@ -208,10 +221,11 @@
     if (scene === soundScene) return;
     const first = !soundScene;
     soundScene = scene;
-    if (ph === 'lobby' || ph === 'ranking' || ph === 'spotlight') Sound.bgm('party');
+    if (['lobby', 'intro', 'ranking', 'spotlight'].includes(ph)) Sound.bgm('party');
     else if (ph === 'question') Sound.bgm('think');
     else Sound.bgm(null);
     if (first) return;                         // 開いた直後は効果音を鳴らさない
+    if (ph === 'intro') Sound.play('spot');
     if (ph === 'question') Sound.play('question');
     if (ph === 'closed') Sound.playClose();
     if (ph === 'reveal') Sound.play('reveal');
@@ -251,7 +265,7 @@
   }
 
   function renderControls(list) {
-    const labels = { lobby: '受付中', question: '回答受付中', closed: '締切', reveal: '正解発表', ranking: '順位表示', spotlight: '個人の結果' };
+    const labels = { lobby: '受付中', intro: '問題の予告', question: '回答受付中', closed: '締切', reveal: '正解発表', ranking: '順位表示', spotlight: '個人の結果' };
     $('phaseLabel').textContent = labels[S.state.phase] || '';
     $('btnNext').textContent = nextLabel();
     const sel = $('selQ'), cur = curIdx();
@@ -267,10 +281,12 @@
     const pids = Object.keys(S.players);
     const i = curIdx();
     $('qnum').textContent = q && ph !== 'lobby' ? `Q${i + 1} / ${list.length}` : '';
-    $('qtype').innerHTML = q && ph !== 'lobby' ? `<span class="badge">${esc(TYPES[q.type].short)}</span>${pts(q) !== 1 ? `<span class="badge pts">配点 ×${fmt(pts(q))}</span>` : ''}` : '';
+    $('qtype').innerHTML = q && ph !== 'lobby' ? `<span class="badge">${esc(TYPES[q.type].short)}</span><span class="badge pts">${fmt(pts(q))}点${pts(q) !== 1 ? `（×${fmt(pts(q))}）` : ''}</span>` : '';
     const hb = $('btnHint'), nh = q ? toArr(q.hints).length : 0, sh = toArr(S.state.hints).length;
     hb.classList.toggle('hidden', !(nh && ['question', 'closed'].includes(ph)));
     hb.textContent = `ヒント ${sh}/${nh}`; hb.disabled = sh >= nh;
+    hb.classList.toggle('pulse', ph === 'question' && sh < nh);
+    renderHintBubble(ph, q, nh, sh);
     if (ph === 'lobby') {
       $('answered').textContent = '';
       $('chips').innerHTML = '';
@@ -329,12 +345,13 @@
     }
     if (ph === 'spotlight') { m.innerHTML = spotlightHtml(list); return; }
     if (!q) { m.innerHTML = ''; return; }
+    if (ph === 'intro') { m.innerHTML = introHtml(q, list); lastScene = 'intro|' + q.id; return; }
 
     const head = `<div class="qtitle">${esc(q.title)}</div>`;
     const scene = ph + '|' + q.id;
     m.classList.remove('enter');
     if (ph === 'question' || ph === 'closed') {
-      m.innerHTML = head + hintsHtml() + withImg(q, questionHtml(q)) + (ph === 'closed' ? '<div class="overlay"><span>締切！</span></div>' : '');
+      m.innerHTML = `<div class="qhead">${head}<div id="hintBubble"></div></div>` + hintsHtml() + withImg(q, questionHtml(q)) + (ph === 'closed' ? '<div class="overlay"><span>締切！</span></div>' : '');
       if (ph === 'question' && scene !== lastScene) { void m.offsetWidth; m.classList.add('enter'); }
     } else if (ph === 'reveal') {
       m.innerHTML = head + withImg(q, revealHtml(q));
@@ -344,6 +361,31 @@
     }
     lastScene = scene;
     Q.hydrateImages(m);
+  }
+
+  // 予告画面：Q番号・配点（満点）・ヒントの有無
+  function introHtml(q, list) {
+    const i = list.findIndex(x => x.id === q.id), nh = toArr(q.hints).length, p = pts(q);
+    return `<div class="intro">
+      <div class="intro-q">Q${i + 1}<small> / ${list.length}</small></div>
+      <div class="intro-type"><span>${esc(TYPES[q.type].short)}</span></div>
+      <div class="intro-pts"><b>${fmt(p)}</b>点<small>（満点）</small>${p !== 1 ? `<span class="intro-x">配点 ×${fmt(p)}</span>` : ''}</div>
+      ${nh ? `<div class="intro-hint">💡 ヒントあります！<small>（${nh}つ）</small></div>` : ''}
+    </div>`;
+  }
+
+  // ヒントの吹き出し（ヒントがある問題だけ）：出し忘れ防止と、回答者が「ヒントほしい！」を言えるように
+  function renderHintBubble(ph, q, nh, sh) {
+    const el = $('hintBubble'); if (!el) return;
+    let h = '';
+    if (q && nh && (ph === 'question' || ph === 'closed')) {
+      const rem = nh - sh, req = Object.values((S.hintReq || {})[q.id] || {}).filter(v => Number(v) === sh).length;   // 今のヒント数のときのリクエストだけ数える
+      h = rem > 0
+        ? `<div class="hbub ${req ? 'asked' : ''}"><div class="hbub-main">💡 ヒントあります！</div>
+            <div class="hbub-sub">あと <b>${rem}</b>つ${req ? `<span class="hbub-req">🙋 ヒントほしい <b>${req}</b>人</span>` : '<span class="hbub-tip">スマホの「ヒントほしい！」で呼べます</span>'}</div></div>`
+        : `<div class="hbub done"><div class="hbub-sub">💡 ヒントはすべて出ました</div></div>`;
+    }
+    if (el.dataset.h !== h) { el.innerHTML = h; el.dataset.h = h; }
   }
 
   // 問題の画像（顔写真など）を左に大きく
@@ -361,7 +403,7 @@
     const n = toArr(q.items).length;
     if (q.type === 'order') return orderLabels(q) ? orderLabels(q) + '　スマホで並べ替えて回答' : `スマホで A〜${LETTERS[n - 1]} を並べ替えて回答（一番上が①）`;
     if (q.type === 'match') return `A〜${LETTERS[n - 1]} はそれぞれどの写真？ スマホで線をつないで回答`;
-    if (q.type === 'pair') return `A〜${LETTERS[n - 1]} はそれぞれどれ？ スマホで線をつないで回答`;
+    if (q.type === 'pair') return `A〜${LETTERS[n - 1]} はそれぞれどれ？ スマホで線をつないで回答${q.multi ? '（同じ答えの人もいます）' : ''}`;
     if (q.type === 'group') return 'それぞれどのグループ？ スマホでカードを箱に入れて回答';
     return '';
   }
@@ -399,17 +441,19 @@
       Object.values(ans).forEach(a => { if (a && cnt[a.v] != null) cnt[a.v]++; });
       const winners = Object.keys(res).filter(p => full(res[p]));
       return `<div class="tiles" style="grid-template-columns:repeat(${opts.length <= 4 ? 2 : 3},1fr)">
-        ${opts.map((o, i) => `<div class="tile c${i} ${Number(key) === i ? 'correct' : 'dim'} ${o.note ? 'hasnote' : ''}"><span class="num">${i + 1}</span>${img(o.img)}
+        ${opts.map((o, i) => `<div class="tile c${i} ${Q.choiceOk(key, i) ? 'correct' : 'dim'} ${o.note ? 'hasnote' : ''}"><span class="num">${i + 1}</span>${img(o.img)}
           ${o.text ? `<div class="txt">${esc(o.text)}</div>` : ''}${note(o)}<span class="cnt"><span data-count="${cnt[i]}">0</span>人</span>
           <span class="bar" style="width:0" data-w="${pct(cnt[i], answered)}"></span></div>`).join('')}</div>
         <div class="perfect"><span class="pc">正解者<b data-count="${winners.length}">0</b>人 / ${answered}人</span>${pts(q) !== 1 ? `<span class="pc sub2">正解で ${fmt(pts(q))}点</span>` : ''}${winners.length && winners.length <= 30 ? '<span class="pn">' + names(winners) + '</span>' : ''}</div>${explain}`;
     }
     const items = toArr(q.items), slots = toArr(q.slots), k = toArr(key);
-    const rate = i => pct(Object.values(ans).filter(a => a && toArr(a.v)[i] != null && Number(toArr(a.v)[i]) === Number(k[i])).length, answered);
+    const rate = i => pct(Object.values(ans).filter(a => a && Q.itemOk(q, key, a.v, i)).length, answered);
+    const ranges = q.type === 'order' ? Q.orderRanges(key) : [];
+    const posLabel = j => { const [a, b] = ranges[j]; return a === b ? Q.CIRCLED[a] : `${Q.CIRCLED[a]}<small>〜</small>${Q.CIRCLED[b]}`; };
     let h = '';
     if (q.type === 'order') {
       const byRank = items.map((it, j) => ({ it, j, r: Number(k[j]) })).sort((a, b) => a.r - b.r);
-      h = `<div class="olist">${q.topLabel ? `<div class="olabel">▲ ${esc(q.topLabel)}</div>` : ''}${byRank.map(x => `<div class="orow"><span class="pos">${Q.CIRCLED[x.r]}</span>
+      h = `<div class="olist">${q.topLabel ? `<div class="olabel">▲ ${esc(q.topLabel)}</div>` : ''}${byRank.map(x => `<div class="orow ${ranges[x.j][0] !== ranges[x.j][1] ? 'tie' : ''}"><span class="pos">${posLabel(x.j)}</span>
         <span>${LETTERS[x.j]}</span>${img(x.it.img)}<span>${esc(x.it.text)}</span>${x.it.note ? `<span class="onote">${esc(x.it.note)}</span>` : ''}<span class="rate">正答率 ${rate(x.j)}</span></div>`).join('')}${q.bottomLabel ? `<div class="olabel">▼ ${esc(q.bottomLabel)}</div>` : ''}</div>`;
     } else if (q.type === 'match' || q.type === 'pair') {
       h = `<div class="cards">${items.map((it, i) => { const s = slots[Number(k[i])] || {}; return `<div class="card">

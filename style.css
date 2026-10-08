@@ -659,3 +659,67 @@ body.survey #editBtn { margin-top: 14px; }
 .row .chk input, .chk input[type=checkbox] { flex: none; min-width: 0; width: auto; }
 #controls .menu .menu-sel { display: grid; gap: 4px; font-size: 12px; font-weight: 700; color: var(--ink-2); }
 #controls .menu .menu-sel select { max-width: none; width: 100%; }
+.erow.tied { background: #fff6d6; border-color: #f5d97a; }
+.erow.rankrow { grid-template-columns: 74px 1fr auto auto; }
+.erow.rankrow .lab { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.ranksel { font-family: var(--display); color: var(--pink); font-size: 18px; padding: 4px 6px; width: 66px !important; text-align: center; }
+.tiemark { font-family: var(--body); font-size: 11px; font-weight: 800; color: #9a6b00; background: #ffe7a3; border-radius: 999px; padding: 0 8px; }
+.orow.tie { background: #fffbea; border-color: #f5d97a; }
+.orow .pos small { font-size: .55em; margin: 0 .1em; }
+.orow.tie .pos { width: auto; min-width: 6vh; }
+
+/* ---------- 出題前の予告画面（Q番号・配点・ヒント） ---------- */
+.intro { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3.2vh; text-align: center; }
+.intro-q { font-family: var(--display); font-size: 22vh; line-height: 1; color: var(--pink); text-shadow: 0 .8vh 0 rgba(30,27,58,.12); animation: stamp .5s cubic-bezier(.2,1.4,.4,1) both; }
+.intro-q small { font-size: 6vh; color: var(--sub); margin-left: 1vw; }
+.intro-type span { display: inline-block; background: var(--ink); color: #fff; border-radius: 999px; padding: .8vh 2.4vw; font-size: 3.2vh; font-weight: 800; animation: fadeUp .4s .25s both; }
+.intro-pts { display: flex; align-items: baseline; gap: .6vw; background: var(--sun); border-radius: var(--r-l); padding: 1.4vh 3.4vw; box-shadow: var(--lift); font-size: 6vh; font-weight: 800; animation: pop .5s .45s both; }
+.intro-pts b { font-family: var(--display); font-size: 12vh; line-height: 1; font-weight: 400; }
+.intro-pts small { font-size: 3.6vh; color: var(--ink-2); }
+.intro-x { margin-left: 1.4vw; font-size: 3vh; background: rgba(255,255,255,.6); border-radius: 999px; padding: .4vh 1.2vw; }
+.intro-hint { font-size: 5vh; font-weight: 800; color: var(--grape); background: #fff; border: .5vh solid var(--grape); border-radius: 999px; padding: 1vh 3vw; animation: pop .5s .7s both, beat .8s 1.3s ease-in-out infinite alternate; }
+.intro-hint small { font-size: 3vh; color: var(--ink-2); }
+/* スマホ */
+.intro.phone { min-height: 60vh; gap: 18px; }
+.intro.phone .intro-q { font-size: 96px; }
+.intro.phone .intro-q small { font-size: 24px; }
+.intro.phone .intro-type span { font-size: 15px; padding: 4px 14px; }
+.intro.phone .intro-pts { font-size: 24px; padding: 8px 22px; }
+.intro.phone .intro-pts b { font-size: 56px; }
+.intro.phone .intro-pts small { font-size: 15px; }
+.intro.phone .intro-x { font-size: 13px; padding: 2px 10px; }
+.intro.phone .intro-hint { font-size: 20px; border-width: 3px; padding: 6px 18px; }
+.intro.phone .intro-hint small { font-size: 13px; }
+.intro.phone .sub { margin: 0; }
+
+/* 順位（途中経過）ボタンを目立たせる */
+#controls .rankbtn { background: var(--sun); color: var(--ink); border-color: #e0a800; font-weight: 800; box-shadow: 0 3px 0 #c99400; }
+#controls .rankbtn:hover { filter: brightness(1.05); }
+
+/* ---------- ヒントの吹き出し（ヒントがある問題だけ） ---------- */
+.qhead { display: flex; align-items: flex-start; gap: 2vw; }
+.qhead .qtitle { flex: 1; min-width: 0; }
+#hintBubble:empty { display: none; }
+.hbub { position: relative; flex: none; background: var(--grape); color: #fff; border-radius: 2.6vh; padding: 1.4vh 2vw 1.5vh; margin: .6vh 1.4vw 2vh 1.6vw;
+  box-shadow: 0 .6vh 0 #5b3fd6, 0 1.2vh 3vh rgba(124,92,255,.35); animation: pop .5s cubic-bezier(.2,1.6,.4,1) both, hbubBeat 1.6s 1s ease-in-out infinite; transform-origin: left center; }
+.hbub::before { content: ""; position: absolute; left: -1.6vw; top: 2.2vh; border: 1.4vh solid transparent; border-right: 1.8vw solid var(--grape); border-left: 0; }
+.hbub-main { font-size: 3.6vh; font-weight: 800; white-space: nowrap; letter-spacing: .02em; }
+.hbub-sub { font-size: 2.2vh; font-weight: 700; margin-top: .4vh; display: flex; align-items: baseline; gap: 1vw; white-space: nowrap; }
+.hbub-sub b { font-family: var(--display); font-weight: 400; font-size: 3vh; color: var(--sun); }
+.hbub-tip { font-size: 1.8vh; opacity: .85; font-weight: 500; }
+.hbub-req { background: #fff; color: var(--pink-d); border-radius: 999px; padding: .3vh 1vw; animation: pop .4s both; }
+.hbub-req b { color: var(--pink); }
+.hbub.asked { background: var(--pink); box-shadow: 0 .6vh 0 var(--pink-d), 0 1.2vh 3vh rgba(255,61,127,.35); }
+.hbub.asked::before { border-right-color: var(--pink); }
+.hbub.done { background: var(--soft); color: var(--ink-2); box-shadow: none; animation: fadeUp .3s both; }
+.hbub.done::before { border-right-color: var(--soft); }
+@keyframes hbubBeat { 0%, 100% { transform: scale(1) rotate(0); } 50% { transform: scale(1.05) rotate(-1deg); } }
+#controls .hintbtn.pulse { background: var(--grape); color: #fff; border-color: #5b3fd6; animation: hbubBeat 1.2s ease-in-out infinite; }
+/* スマホ */
+.p-hbub { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--grape); color: #fff;
+  border-radius: 16px; padding: 10px 10px 10px 14px; margin: 4px 0 14px; box-shadow: 0 3px 0 #5b3fd6; animation: pop .45s cubic-bezier(.2,1.6,.4,1) both; }
+.p-hbub::before { content: ""; position: absolute; left: 22px; top: -9px; border: 9px solid transparent; border-bottom-color: var(--grape); border-top: 0; }
+.p-hbub-t { font-weight: 800; font-size: 15px; }
+.p-hbub-t small { display: block; font-size: 12px; opacity: .85; font-weight: 700; }
+.p-hbub-btn { flex: none; background: #fff; color: var(--pink-d); border: 0; border-radius: 999px; padding: 8px 14px; font-weight: 800; font-size: 14px; box-shadow: 0 2px 0 rgba(0,0,0,.15); }
+.p-hbub-btn:disabled { background: rgba(255,255,255,.25); color: #fff; box-shadow: none; }

@@ -32,6 +32,7 @@
   if (!pid) { pid = Q.uid(); Q.lsSet('pid', pid); }
 
   let me = null, meLoaded = false;
+  let hintQid = null, hintSeen = 0; const hintAsked = {};
   let state = { phase: 'lobby' }, curQ = null, myAns = null, myRes, scores = {}, players = {};
   // local.value[項目] = 割り当てた番号/グループ（未選択は null）
   let local = { qid: null, value: null, order: null, sel: null };
@@ -70,6 +71,9 @@
     if (before === 'question' && state.phase === 'closed' && me) { Q.toast('締切です', 'warn'); Q.vibrate(80); }
     if (before && before !== 'question' && state.phase === 'question' && me) Q.vibrate(40);
     if (state.phase === 'spotlight' && state.spotPid === pid && before !== 'spotlight') Q.vibrate([60, 60, 60]);
+    const hn = toArr(state.hints).length;
+    if (me && state.qid === hintQid && hn > hintSeen) { Q.toast('💡 ヒントが出ました', 'info'); Q.vibrate(30); }
+    hintQid = state.qid; hintSeen = hn;
     bindQuestion(); render();
   }
 
@@ -108,6 +112,7 @@
       return;
     }
     if (ph === 'ranking' || ph === 'spotlight') return renderRanking();
+    if (ph === 'intro') return renderIntro();
     if (!curQ) { view.dataset.h = ''; view.innerHTML = '<div class="center sub">読み込み中…</div>'; return; }
     if (ph === 'question') return renderQuestion();
     if (ph === 'closed') {
@@ -115,6 +120,17 @@
       return;
     }
     if (ph === 'reveal') return renderReveal();
+  }
+
+  // ---------- 出題前の予告（Q番号・配点・ヒントの有無） ----------
+  function renderIntro() {
+    const it = state.intro || {}, p = Number(it.points) || 1;
+    setView(`<div class="center intro phone">
+      <div class="intro-q">Q${it.n || ''}<small>${it.total ? ' / ' + it.total : ''}</small></div>
+      ${it.type && Q.TYPES[it.type] ? `<div class="intro-type"><span>${esc(Q.TYPES[it.type].short)}</span></div>` : ''}
+      <div class="intro-pts"><b>${Q.fmt(p)}</b>点<small>（満点）</small>${p !== 1 ? `<span class="intro-x">×${Q.fmt(p)}</span>` : ''}</div>
+      ${it.hints ? `<div class="intro-hint">💡 ヒントあります！</div>` : ''}
+      <p class="sub">まもなく出題します</p></div>`);
   }
 
   // ---------- 参加登録（名簿があれば名前を選ぶだけ） ----------
@@ -176,13 +192,22 @@
   function syncOrder() { local.value = local.order.map(() => 0); local.order.forEach((item, pos) => { local.value[item] = pos; }); }
   const sameAsSent = () => myAns && JSON.stringify(toArr(myAns.v).map(Number)) === JSON.stringify(local.value);
 
+  // ヒントの吹き出し：ヒントがある問題だけ。「ヒントほしい！」で司会の画面に人数が出る
+  function hintBubbleHtml(q) {
+    const total = Number(q.hintTotal) || 0; if (!total) return '';
+    const rem = total - toArr(state.hints).length;
+    if (rem <= 0) return '';
+    const asked = hintAsked[q.id + '|' + toArr(state.hints).length];
+    return `<div class="p-hbub"><div class="p-hbub-t">💡 ヒントがあります<small>（あと${rem}つ）</small></div>
+      <button id="hintReqBtn" class="p-hbub-btn" ${asked ? 'disabled' : ''}>${asked ? '🙋 リクエストしました' : '🙋 ヒントほしい！'}</button></div>`;
+  }
   function renderQuestion() {
     const q = curQ;
     initLocal(q);
-    let h = `<div class="p-q"><span class="p-timer" id="pTimer"></span>${esc(q.title)}</div>`;
+    let h = `<div class="p-q"><span class="p-timer" id="pTimer"></span>${esc(q.title)}</div>` + hintBubbleHtml(q);
     const hs = toArr(state.hints);
     if (hs.length) h += `<div class="p-hints">${hs.map((t, i) => `<div><b>ヒント${i + 1}</b>${esc(t)}</div>`).join('')}</div>`;
-    if (pts(q) !== 1) h += `<p class="p-pts">この問題は配点 ×${fmt(pts(q))}</p>`;
+    h += `<p class="p-pts">この問題は ${fmt(pts(q))}点（満点）${pts(q) !== 1 ? `・配点 ×${fmt(pts(q))}` : ''}</p>`;
     if (q.img) h += `<img class="p-qimg" data-img="${esc(q.img)}" alt="">`;
     if (q.type === 'choice') {
       const opts = toArr(q.options);
@@ -204,7 +229,7 @@
   }
   function updateTimer() { const r = remaining(), t = document.getElementById('pTimer'); if (t && r != null) t.textContent = '⏱ ' + Math.max(0, r); }
   function hintText(q) {
-    if (isMatch(q)) return '左の点から右の点へ線を引いてください';
+    if (isMatch(q)) return q.multi ? '左の点から右の点へ線を引いてください（同じ言葉に複数つないでOK）' : '左の点から右の点へ線を引いてください';
     if (q.type === 'group') return 'すべて箱に入れてから送信';
     return '';
   }
@@ -265,7 +290,8 @@
   }
   window.addEventListener('resize', () => { if (document.getElementById('mt') && !drag) drawLines(); });
   function connect(l, r) {
-    local.value = local.value.map(v => (v === r ? null : v));   // 1つの写真は1人だけ
+    // 同じ答えをまとめた言葉マッチング（multi）は、1つの言葉に複数の線をつなげる
+    if (!(curQ && curQ.multi)) local.value = local.value.map(v => (v === r ? null : v));   // 1つの写真は1人だけ
     local.value[l] = r;
   }
 
@@ -383,6 +409,13 @@
   // ---------- クリック（選択肢・送信・線の削除・箱のタップ） ----------
   view.addEventListener('click', e => {
     if (state.phase !== 'question' || !curQ) return;
+    if (e.target.closest('#hintReqBtn')) {
+      const hk = curQ.id + '|' + toArr(state.hints).length;
+      if (hintAsked[hk]) return;
+      hintAsked[hk] = true;
+      E.set('hintReq/' + curQ.id + '/' + pid, toArr(state.hints).length).then(() => Q.toast('司会にヒントをリクエストしました'));
+      Q.vibrate(15); renderQuestion(); return;
+    }
     const c = e.target.closest('[data-c]');
     if (c) {
       local.value = +c.dataset.c;
@@ -422,13 +455,13 @@
     let keyHtml = '';
     if (key != null) {
       if (q.type === 'choice') {
-        const o = toArr(q.options)[key] || {};
-        keyHtml = `<div class="keylist">正解：<b>${Number(key) + 1}</b> ${esc(o.text || '')}${nt(o)}</div>`;
+        keyHtml = `<div class="keylist">${Q.choiceKeys(key).map(c => { const o = toArr(q.options)[c] || {};
+          return `<div>正解：<b>${c + 1}</b> ${esc(o.text || '')}${nt(o)}</div>`; }).join('')}</div>`;
       } else {
         const mine = myAns ? toArr(myAns.v) : [];
         keyHtml = `<div class="keylist"><div class="sub">正解</div>${toArr(q.items).map((it, i) => {
-          const ok = myAns && Number(mine[i]) === Number(toArr(key)[i]);
-          return `<div>${myAns ? (ok ? '✅' : '❌') : ''} <b>${LETTERS[i]}</b> ${esc(it.text || '')} → <b>${esc(slotLabel(q, Number(toArr(key)[i])))}</b>${nt(it)}</div>`;
+          const ok = myAns && Q.itemOk(q, key, mine, i);
+          return `<div>${myAns ? (ok ? '✅' : '❌') : ''} <b>${LETTERS[i]}</b> ${esc(it.text || '')} → <b>${esc(Q.keyLabel(q, key, i))}</b>${nt(it)}</div>`;
         }).join('')}</div>`;
       }
     }

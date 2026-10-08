@@ -102,14 +102,40 @@
     return CIRCLED[k] || String(k + 1);
   }
 
+  // ===== 正解の判定（同率・同じ答え・複数正解に対応） =====
+  // 並び替えの正解 key[j] は「順位グループ」（同率なら同じ数字）。
+  // 各グループが占める位置の範囲を求める（例：[0,1,1,1] → ①、②〜④、②〜④、②〜④）
+  function orderRanges(key) {
+    const k = toArr(key).map(Number), cnt = {};
+    k.forEach(g => { cnt[g] = (cnt[g] || 0) + 1; });
+    const start = {}; let pos = 0;
+    [...new Set(k)].sort((a, b) => a - b).forEach(g => { start[g] = pos; pos += cnt[g]; });
+    return k.map(g => [start[g], start[g] + cnt[g] - 1]);
+  }
+  // 項目 i の回答が正しいか
+  function itemOk(q, key, value, i) {
+    const v = toArr(value)[i];
+    if (v == null || key == null) return false;
+    if (q.type === 'order') { const r = orderRanges(key)[i]; return Number(v) >= r[0] && Number(v) <= r[1]; }
+    return Number(v) === Number(toArr(key)[i]);
+  }
+  // 選択問題：正解が1つ（数字）でも複数（配列）でも判定できる
+  const choiceKeys = key => (key != null && typeof key === 'object' ? toArr(key) : [key]).map(Number);
+  const choiceOk = (key, v) => v != null && choiceKeys(key).includes(Number(v));
+  // 正解の表示用ラベル（並び替えの同率は「②〜④（同率）」）
+  function keyLabel(q, key, i) {
+    if (q.type === 'order') { const [a, b] = orderRanges(key)[i]; return a === b ? CIRCLED[a] : `${CIRCLED[a]}〜${CIRCLED[b]}（同率）`; }
+    return slotLabel(q, Number(toArr(key)[i]));
+  }
+
   // 採点：選択は正解で1点。それ以外は「合っている項目数 ÷ 項目数」の部分点
   function scoreAnswer(q, key, value) {
     if (value == null || key == null) return 0;
-    if (q.type === 'choice') return Number(value) === Number(key) ? 1 : 0;
-    const k = toArr(key), v = toArr(value), n = toArr(q.items).length;
+    if (q.type === 'choice') return choiceOk(key, value) ? 1 : 0;
+    const n = toArr(q.items).length;
     if (!n) return 0;
     let ok = 0;
-    for (let i = 0; i < n; i++) if (v[i] != null && Number(v[i]) === Number(k[i])) ok++;
+    for (let i = 0; i < n; i++) if (itemOk(q, key, value, i)) ok++;
     return ok / n;
   }
 
@@ -430,6 +456,7 @@
 
   window.Q = {
     C, Store, CIRCLED, LETTERS, TYPES, uid, esc, fmt, toArr, sortedQuestions, slotLabel,
+    orderRanges, itemOk, choiceKeys, choiceOk, keyLabel,
     scoreAnswer, buildRanking, compressImage, getImage, setImageBase, hydrateImages, lsGet, lsSet, demoBanner,
     scope, hashPass, eventGate, leaveEvent, rosterNames, rosterFromNames,
     PREFS, SURVEY_KINDS, SURVEY_TEMPLATES, surveyText, surveyQuestions, FACE,

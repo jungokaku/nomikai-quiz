@@ -151,11 +151,21 @@
 
   // ---------- 下書き（編集用の形）----------
   function blankEntry() { return { text: '', img: '', photo: '', word: '', group: 0, note: '' }; }
+  // 並び替えの順位をそろえる：順位の小さい順に並べ、同じ数字は同率（例：1・2・2・2）。
+  // rank が無い項目（古いデータ・アンケートからの下書き）は「前と同率（tie）」から作る
+  function normRanks(E) {
+    E.forEach((e, i) => { if (e.rank == null || isNaN(e.rank)) e.rank = i > 0 && e.tie ? E[i - 1].rank : i + 1; delete e.tie; });
+    const s = E.map((e, i) => [e, i]).sort((a, b) => a[0].rank - b[0].rank || a[1] - b[1]).map(x => x[0]);
+    const v = s.map(e => e.rank);
+    s.forEach((e, i) => { e.rank = i > 0 && v[i] === v[i - 1] ? s[i - 1].rank : i + 1; });
+    E.splice(0, E.length, ...s);
+    return E;
+  }
   function blankDraft(type) {
     return {
       id: null, type, title: '', timeLimit: 30, shuffle: true, points: 1, img: '',
       hints: [], explain: '', topLabel: '', bottomLabel: '',
-      options: [{ text: '', img: '', note: '' }, { text: '', img: '', note: '' }], correct: 0,
+      options: [{ text: '', img: '', note: '' }, { text: '', img: '', note: '' }], correct: [0],
       entries: [blankEntry(), blankEntry(), blankEntry(), blankEntry()],
       groups: ['グループ1', 'グループ2']
     };
@@ -168,10 +178,11 @@
     const items = toArr(q.items), slots = toArr(q.slots), k = toArr(key);
     if (q.type === 'choice') {
       d.options = toArr(q.options).map(o => ({ text: o.text || '', img: o.img || '', note: o.note || '' }));
-      d.correct = Number(key) || 0;
+      d.correct = Q.choiceKeys(key).filter(n => !isNaN(n));
     } else if (q.type === 'order') {
       d.entries = items.map((it, j) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', note: it.note || '', _r: Number(k[j]) }))
-        .sort((a, b) => a._r - b._r).map(({ _r, ...e }) => e);
+        .sort((a, b) => a._r - b._r).map((e, i, arr) => { const { _r, ...x } = e; x.tie = i > 0 && arr[i - 1]._r === _r; return x; });
+      normRanks(d.entries);
     } else if (q.type === 'match') {
       d.entries = items.map((it, i) => ({ ...blankEntry(), text: it.text || '', img: it.img || '', note: it.note || '', photo: (slots[Number(k[i])] || {}).img || '' }));
     } else if (q.type === 'pair') {
@@ -205,16 +216,21 @@
       if (d.options.length < 2) errors.push('選択肢は2つ以上必要です');
       if (d.options.some(o => !has(o))) errors.push('空の選択肢があります（文字か画像を入れてください）');
       q.options = d.options.map(o => ({ text: (o.text || '').trim(), img: o.img || '', note: nt(o) }));
-      key = Math.min(d.correct, d.options.length - 1);
+      const cs = [...new Set(toArr(d.correct).map(Number))].filter(n => n >= 0 && n < d.options.length).sort((a, b) => a - b);
+      if (!cs.length) errors.push('正解を1つ以上チェックしてください');
+      key = cs.length === 1 ? cs[0] : cs;
     } else {
       const E = d.entries;
       if (E.length < 2) errors.push('項目は2つ以上必要です');
       if (E.some(e => !has(e))) errors.push('空の項目があります（文字か画像を入れてください）');
       if (d.type === 'order') {
-        const p = shuffled(E.length, d.shuffle);           // p[j] = 表示位置jに来る項目の正解順位
+        // 順位グループ：「前と同率」なら前の項目と同じグループ
+        normRanks(E);
+        const rv = [...new Set(E.map(e => e.rank))].sort((a, b) => a - b), grp = E.map(e => rv.indexOf(e.rank));
+        const p = shuffled(E.length, d.shuffle);           // p[j] = 表示位置jに来る項目（入力順の番号）
         q.items = p.map(r => ({ text: E[r].text.trim(), img: E[r].img || '', note: nt(E[r]) }));
         q.slots = E.map(() => ({ text: '', img: '' }));
-        key = p.slice();
+        key = p.map(r => grp[r]);
         if (d.topLabel.trim()) q.topLabel = d.topLabel.trim();
         if (d.bottomLabel.trim()) q.bottomLabel = d.bottomLabel.trim();
       } else if (d.type === 'match') {
@@ -225,10 +241,13 @@
         key = E.map((_, i) => s.indexOf(i));
       } else if (d.type === 'pair') {
         if (E.some(e => !(e.word || '').trim())) errors.push('右側の言葉が空の行があります');
-        const s = shuffled(E.length, true);                // s[k] = 言葉の番号kに来る項目
-        q.items = E.map(e => ({ text: e.text.trim(), img: '', note: nt(e) }));
-        q.slots = s.map(i => ({ text: (E[i].word || '').trim(), img: '' }));
-        key = E.map((_, i) => s.indexOf(i));
+        // 同じ言葉は1つにまとめる（例：B型が2人なら「B型」は1枚、2人とも同じ言葉が正解）
+        const words = E.map(e => (e.word || '').trim()), uniq = [...new Set(words)];
+        const s = shuffled(uniq.length, true);             // s[k] = 言葉の番号kに来る言葉（uniq の番号）
+        q.items = E.map(e => ({ text: e.text.trim(), img: e.img || '', note: nt(e) }));
+        q.slots = s.map(u => ({ text: uniq[u], img: '' }));
+        key = words.map(w => s.indexOf(uniq.indexOf(w)));
+        if (uniq.length < E.length) q.multi = true;
       } else if (d.type === 'group') {
         const G = d.groups.map(g => (g || '').trim());
         if (G.length < 2) errors.push('グループは2つ以上必要です');
@@ -307,30 +326,33 @@
     const d = draft, el = document.getElementById('editor');
     let body = '';
     if (d.type === 'choice') {
-      body = `<div class="field"><label>選択肢（正解にチェック）</label>
+      body = `<div class="field"><label>選択肢（正解にチェック・<b>複数可</b>）</label>
         ${d.options.map((o, i) => `<div class="erow">
           <div class="lab">${i + 1}</div>
           <input data-list="options" data-i="${i}" data-k="text" value="${esc(o.text)}" placeholder="選択肢の文字（画像だけでもOK）">
           <div class="imgs">${imgBox('options', i, 'img', o.img, '画像')}</div>
-          <div class="ctrl"><label><input type="radio" name="correct" data-f="correct" value="${i}" ${d.correct === i ? 'checked' : ''} style="width:auto"> 正解</label>
+          <div class="ctrl"><label class="chk"><input type="checkbox" data-cor="${i}" ${toArr(d.correct).includes(i) ? 'checked' : ''}> 正解</label>
             <button data-act="del" data-list="options" data-i="${i}" ${d.options.length <= 2 ? 'disabled' : ''}>削除</button></div>
         </div>`).join('')}
         <button data-act="add" data-list="options" ${d.options.length >= 6 ? 'disabled' : ''}>＋ 選択肢を追加</button>
-        <p class="mini">例：「1位は誰？」は候補を並べて1つ正解に。「どっちがAさんの絵？」は画像2枚を入れて正解を選択。</p></div>`;
+        <p class="mini">例：「1位は誰？」は候補を並べて1つ正解に。「B型なのは誰？」で2人いれば2つともチェック（どちらを選んでも正解）。</p></div>`;
     } else if (d.type === 'order') {
       body = `<div class="field"><label>並べる基準（任意・スクリーンとスマホに表示）</label>
         <div class="row"><input data-f="topLabel" value="${esc(d.topLabel)}" placeholder="一番上（例：北）" maxlength="12">
           <span class="pairarrow">→</span><input data-f="bottomLabel" value="${esc(d.bottomLabel)}" placeholder="一番下（例：南）" maxlength="12"></div>
         <p class="mini">例：「出身地が北の人から順番に」→ 一番上「北」、一番下「南」。空欄なら表示しません。</p></div>
         <div class="field"><label>項目を<b>正解の順番（①が先頭）</b>で入力してください</label>
-        ${d.entries.map((e, i) => `<div class="erow">
-          <div class="lab">${CIRCLED[i]}</div>
+        ${(() => { normRanks(d.entries); const n = d.entries.length, cnt = {}; d.entries.forEach(e => { cnt[e.rank] = (cnt[e.rank] || 0) + 1; });
+          return d.entries.map((e, i) => `<div class="erow rankrow ${cnt[e.rank] > 1 ? 'tied' : ''}">
+          <div class="lab"><select data-rank="${i}" class="ranksel" aria-label="順位">${Array.from({ length: n }, (_, k) => `<option value="${k + 1}" ${e.rank === k + 1 ? 'selected' : ''}>${CIRCLED[k]}</option>`).join('')}</select>${cnt[e.rank] > 1 ? '<small class="tiemark">同率</small>' : ''}</div>
           <input data-list="entries" data-i="${i}" data-k="text" value="${esc(e.text)}" placeholder="項目名（例：田中さん）">
           <div class="imgs">${imgBox('entries', i, 'img', e.img, '画像')}</div>
-          <div class="ctrl"><button data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button><button data-act="down" data-i="${i}" ${i === d.entries.length - 1 ? 'disabled' : ''}>↓</button>
+          <div class="ctrl">
+            <button data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''}>↑</button><button data-act="down" data-i="${i}" ${i === d.entries.length - 1 ? 'disabled' : ''}>↓</button>
             <button data-act="del" data-list="entries" data-i="${i}" ${d.entries.length <= 2 ? 'disabled' : ''}>削除</button></div>
-        </div>`).join('')}
+        </div>`).join(''); })()}
         <button data-act="add" data-list="entries" ${d.entries.length >= 8 ? 'disabled' : ''}>＋ 項目を追加</button>
+        <p class="mini">左の順位（①②…）を選ぶと、その順に並び替わります。<b>同じ順位を選ぶと同率</b>です。例：千葉1人・神奈川3人なら、千葉を①、神奈川の3人をすべて② → 3人がどの順でも正解。</p>
         <p class="mini"><label><input type="checkbox" data-f="shuffle" ${d.shuffle ? 'checked' : ''} style="width:auto"> 保存時にA・B・C…の並びをシャッフルする</label></p></div>`;
     } else if (d.type === 'match') {
       body = `<div class="field"><label>項目と<b>正解の写真</b>をペアで入力（写真の①②…の番号は保存時に自動でシャッフル）</label>
@@ -352,7 +374,7 @@
           <div class="ctrl"><button data-act="del" data-list="entries" data-i="${i}" ${d.entries.length <= 2 ? 'disabled' : ''}>削除</button></div>
         </div>`).join('')}
         <button data-act="add" data-list="entries" ${d.entries.length >= 8 ? 'disabled' : ''}>＋ ペアを追加</button>
-        <p class="mini">例：「好きな食べ物はどれ？」→ A 田中さん ↔ カレー、B 佐藤さん ↔ ラーメン…。右側の言葉は短め（15文字くらいまで）がスマホで見やすくなります。</p></div>`;
+        <p class="mini">例：「血液型は？」→ A 田中さん ↔ A型、B 佐藤さん ↔ B型…。<b>同じ言葉は1枚にまとめ</b>、その人たち全員が同じ言葉で正解になります。右側の言葉は短め（15文字くらいまで）がスマホで見やすくなります。</p></div>`;
     } else if (d.type === 'group') {
       body = `<div class="field"><label>グループ名</label>
         ${d.groups.map((g, i) => `<div class="erow" style="grid-template-columns:34px 1fr auto">
@@ -633,19 +655,19 @@
         d.topLabel = desc ? '大きい' : '小さい'; d.bottomLabel = desc ? '小さい' : '大きい';
       }
       const sorted = list.slice().sort((a, b) => rank(a) - rank(b));
-      const tie = sorted.some((p, i) => i && rank(p) === rank(sorted[i - 1]));
-      d.entries = sorted.map(p => entry(p));
-      if (tie) d._warn = '同じ回答の人がいます。並び順が1通りに決まらないので、人を入れ替えるか確認してください';
+      d.entries = sorted.map((p, i) => entry(p, { tie: i > 0 && rank(p) === rank(sorted[i - 1]) }));
+      if (d.entries.some(e => e.tie)) d._info = '同じ回答の人は同率（同じ順位）にしました。その人たちはどの順でも正解になります';
     } else if (gen.type === 'pair') {
       d.title = sq.kind === 'pref' ? `それぞれの${base || '出身地'}はどこ？` : `それぞれの${base}は？`;
       d.entries = list.map(p => entry(p, { word: txt(p.v), note: '' }));
       const words = d.entries.map(e => e.word);
-      if (new Set(words).size < words.length) d._warn = '同じ回答の人がいます。正解が1通りに決まらないので、人を入れ替えるか確認してください';
+      if (new Set(words).size < words.length) d._info = '同じ回答の言葉は1つにまとめます。その人たちは全員同じ言葉で正解になります';
     } else if (gen.type === 'who') {
       d.title = `「${txt(target.v)}」と答えたのは誰？`;
       d.options = list.map(p => ({ text: p.name, img: fimg(p), note: txt(p.v) }));
-      d.correct = list.indexOf(target);
-      if (list.some(p => p !== target && txt(p.v) === txt(target.v))) d._warn = 'ほかにも同じ回答の人がいます';
+      // 同じ回答の人は全員正解にする
+      d.correct = list.map((p, i) => (txt(p.v) === txt(target.v) ? i : -1)).filter(i => i >= 0);
+      if (d.correct.length > 1) d._info = `同じ回答の人が${d.correct.length}人いるので、全員を正解にしました`;
     } else if (gen.type === 'group') {
       const opts = toArr(sq.options).filter(o => list.some(p => p.v === o));
       if (opts.length < 2) return '選んだ人の回答が1種類だけなので、グループ分けにできません';
@@ -660,11 +682,11 @@
       d.title = 'この人は誰？';
       d.img = target.v;
       d.options = list.map(p => ({ text: p.name, img: '', note: '' }));
-      d.correct = list.indexOf(target);
+      d.correct = [list.indexOf(target)];
     } else if (gen.type === 'faceopt') {
       d.title = `${target.name}さんはどの人？`;
       d.options = list.map(p => ({ text: '', img: p.v, note: p.name }));
-      d.correct = list.indexOf(target);
+      d.correct = [list.indexOf(target)];
     } else if (gen.type === 'what') {
       let opts;
       if (sq.kind === 'choice') opts = toArr(sq.options).slice(0, 6);
@@ -675,7 +697,7 @@
       d.title = `${target.name}さんの${base}は？`;
       d.img = gen.face ? faceOf(target.key) : '';
       d.options = opts.map(o => ({ text: o, img: '', note: list.filter(p => txt(p.v) === o).map(p => p.name).join('、') }));
-      d.correct = opts.indexOf(txt(target.v));
+      d.correct = [opts.indexOf(txt(target.v))];
       d.explain = '';
       return d;
     }
@@ -740,11 +762,11 @@
       if (g.dataset.genop === 'make') {
         const d = buildDraft(sq);
         if (typeof d === 'string') { document.getElementById('genErr').textContent = d; return; }
-        const warn = d._warn; delete d._warn;
+        const warn = d._warn, info = d._info; delete d._warn; delete d._info;
         draft = d; gen = null;
         setTab('editor'); renderEditor(); renderList();
         window.scrollTo({ top: 0, behavior: 'smooth' });
-        toast(warn || '下書きを作りました。内容を確認して「保存」してください', warn ? 'warn' : 'ok');
+        toast(warn || info || '下書きを作りました。内容を確認して「保存」してください', warn ? 'warn' : info ? 'info' : 'ok');
         return;
       }
       renderSurvey();
@@ -787,7 +809,7 @@
 
   // 配点・ヒント・説明（すべて任意）
   function extrasHtml(d) {
-    const lab = i => d.type === 'choice' ? String(i + 1) : d.type === 'order' ? CIRCLED[i] : LETTERS[i];
+    const lab = i => d.type === 'choice' ? String(i + 1) : d.type === 'order' ? CIRCLED[((d.entries[i] || {}).rank || i + 1) - 1] : LETTERS[i];
     const src = d.type === 'choice' ? d.options : d.entries;
     const listKey = d.type === 'choice' ? 'options' : 'entries';
     const nm = o => esc((o.text || '').trim() || (o.img ? '（画像）' : '（未入力）'));
@@ -829,7 +851,11 @@
       } catch (err) { toast('画像を読み込めませんでした。JPEGかPNGを選んでください', 'warn'); }
       return;
     }
-    if (t.type === 'radio') { draft.correct = +t.value; return; }
+    if (t.dataset.cor !== undefined) {
+      const n = +t.dataset.cor, c = new Set(toArr(draft.correct).map(Number));
+      t.checked ? c.add(n) : c.delete(n); draft.correct = [...c].sort((a, b) => a - b); return;
+    }
+    if (t.dataset.rank !== undefined) { draft.entries[+t.dataset.rank].rank = Number(t.value); normRanks(draft.entries); renderEditor(); return; }
     if (t.type === 'checkbox') { draft[t.dataset.f] = t.checked; return; }
     if (t.tagName === 'SELECT') {
       if (t.dataset.f === 'type') { draft.type = t.value; renderEditor(); return; }
@@ -850,11 +876,15 @@
       if (b.dataset.list === 'options') list.push({ text: '', img: '', note: '' });
       else if (b.dataset.list === 'groups') list.push('グループ' + (list.length + 1));
       else if (b.dataset.list === 'hints') { if (list.length < 5) list.push(''); }
-      else list.push(blankEntry());
+      else list.push(Object.assign(blankEntry(), draft.type === 'order' ? { rank: list.length + 1 } : {}));
     }
     if (act === 'del') {
       list.splice(i, 1);
-      if (b.dataset.list === 'options' && draft.correct >= list.length) draft.correct = 0;
+      if (b.dataset.list === 'options') {
+        draft.correct = toArr(draft.correct).map(Number).filter(n => n !== i).map(n => (n > i ? n - 1 : n));
+        if (!draft.correct.length) draft.correct = [0];
+      }
+      if (b.dataset.list === 'entries' && draft.type === 'order') normRanks(draft.entries);
       if (b.dataset.list === 'groups') draft.entries.forEach(en => { if (en.group >= list.length) en.group = 0; });
     }
     if (act === 'rmimg') list[i][b.dataset.k] = '';
@@ -862,6 +892,7 @@
     if (act === 'up' || act === 'down') {
       const j = act === 'up' ? i - 1 : i + 1, E = draft.entries;
       [E[i], E[j]] = [E[j], E[i]];
+      if (draft.type === 'order') { [E[i].rank, E[j].rank] = [E[j].rank, E[i].rank]; normRanks(E); }
     }
     if (act === 'cancel') { draft = blankDraft('choice'); renderList(); }
     if (act === 'save') {
